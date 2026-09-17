@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -17,18 +17,14 @@ import { SyncApi, type Transport } from "../src/api.ts";
 import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
 import { runSync } from "../src/sync.ts";
 import { NodeAdapter } from "./node-adapter.ts";
+import { type RunningServer, startServer } from "./server-harness.ts";
 
 const SERVER = fileURLToPath(new URL("../target/debug/obsydian-sync-server", import.meta.url));
 const RESTORE = fileURLToPath(new URL("../target/debug/obsydian-restore", import.meta.url));
 const TOKEN = "fullstack-token";
 const PASSPHRASE = "a real passphrase with ünïcode";
-// A fresh port per run. A fixed one collides with a previous run whose server
-// has exited but whose port the OS still holds, which shows up as an
-// intermittent, baffling failure rather than an obvious one.
-const PORT = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://127.0.0.1:${PORT}`;
 
-let server: ChildProcess;
+let server: RunningServer;
 let root: string;
 let vault: string;
 let store: string;
@@ -92,23 +88,14 @@ beforeAll(async () => {
     writeFileSync(abs, typeof content === "string" ? content : Buffer.from(content));
   }
 
-  const digest = execFileSync(SERVER, ["--hash-token"], { input: TOKEN, encoding: "utf8" }).trim();
-  const configPath = join(root, "config.toml");
-  writeFileSync(
-    configPath,
-    [`bind = "127.0.0.1:${PORT}"`, `data_dir = "${store}"`, "", "[[devices]]", 'id = "desktop"', `token_sha256 = "${digest}"`, ""].join("\n"),
-  );
+  server = await startServer({
+    binary: SERVER,
+    dataDir: store,
+    configDir: root,
+    devices: { desktop: TOKEN },
+  });
 
-  server = spawn(SERVER, [configPath], { stdio: "ignore" });
-  for (let i = 0; i < 200; i++) {
-    try {
-      if ((await fetch(`${BASE}/health`)).ok) break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-  }
-
-  api = new SyncApi({ baseUrl: BASE, token: TOKEN, transport, sleep: async () => {} });
+  api = new SyncApi({ baseUrl: server.baseUrl, token: TOKEN, transport, sleep: async () => {} });
   const meta = await api.meta();
   keys = await deriveKeys(await deriveMasterKey(PASSPHRASE, meta.kdf));
   await api.initMeta(await makeKdfCheck(keys, meta.vaultId));
@@ -116,8 +103,8 @@ beforeAll(async () => {
   await runSync({ adapter: new NodeAdapter(vault), api, keys, includeVaultConfig: false });
 }, 60_000);
 
-afterAll(() => {
-  server?.kill("SIGTERM");
+afterAll(async () => {
+  await server?.stop();
   if (root) rmSync(root, { recursive: true, force: true });
 });
 

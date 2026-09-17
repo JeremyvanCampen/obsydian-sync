@@ -1,10 +1,13 @@
-# Builds the plugin and publishes main.js + manifest.json as release assets.
+# Builds the plugin and publishes main.js, manifest.json and versions.json as
+# release assets.
 #
 # BRAT installs from the latest GitHub release, so a tag with no release
 # attached means BRAT has nothing to fetch and users see no update.
 #
-#   npm version patch          # bumps manifest.json via the version script
-#   git push && git push --tags
+#   npm version patch      # bumps package.json, manifest.json and versions.json
+#   git push --follow-tags
+#
+# npm tags as vX.Y.Z by default; the check below accepts that and a bare X.Y.Z.
 
 name: Release
 
@@ -21,31 +24,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # First, because it depends on nothing else and failing here should not
+      # cost a full install and build.
+      - name: Check the tag matches manifest.json
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${TAG#v}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "tag $TAG does not match manifest.json version $MANIFEST" >&2
+            echo "did you bump with 'npm version', which updates both?" >&2
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
 
-      - name: Install
-        run: npm ci
+      - run: npm ci
 
-      # Typecheck and unit tests only: the integration tests need the Rust
-      # server binary, which is checked separately.
       - name: Typecheck
         run: npx tsc --noEmit
+
+      # The tests that need the Rust binaries run in CI; these are the ones that
+      # can run here. Publishing a build that has had no test run against it is
+      # worse than publishing slowly.
+      - name: Test
+        run: >
+          npx vitest run
+          test/crypto.test.ts test/reconcile.test.ts test/scheduler.test.ts
+          test/sync.test.ts test/regressions.test.ts
 
       - name: Build
         run: node esbuild.config.mjs production
 
-      - name: Check the tag matches manifest.json
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          MANIFEST=$(node -p "require('./manifest.json').version")
-          if [ "$TAG" != "$MANIFEST" ]; then
-            echo "tag $TAG does not match manifest.json version $MANIFEST" >&2
-            exit 1
-          fi
+      - name: Bundle smoke test
+        run: npx vitest run test/bundle.test.ts
 
+      # Idempotent: re-running after a transient failure, or retagging after a
+      # fix, must upload the assets rather than abort because the release exists.
       - name: Publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${GITHUB_REF#refs/tags/}" main.js manifest.json --generate-notes
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" main.js manifest.json versions.json --generate-notes \
+            || gh release upload "$TAG" main.js manifest.json versions.json --clobber

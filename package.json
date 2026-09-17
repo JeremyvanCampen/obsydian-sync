@@ -12,7 +12,8 @@
     "test:watch": "npm run build:server && vitest",
     "vectors": "node scripts/gen-vectors.ts",
     "pretest": "npm run build:server",
-    "build:server": "cargo build --package obsydian-sync-server --package obsydian-restore"
+    "build:server": "cargo build --package obsydian-sync-server --package obsydian-restore",
+    "version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [],
   "license": "MIT",

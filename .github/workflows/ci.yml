@@ -13,11 +13,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      # The workspace is compiled twice otherwise — once for cargo test and
+      # again for the pretest hook that builds the binaries the HTTP tests drive.
+      - uses: Swatinem/rust-cache@v2
 
       - run: npm ci
-      - run: npx tsc --noEmit
       - run: cargo test --workspace
-      # Builds the server binary and the bundle first; the HTTP and full-stack
-      # tests drive the real binaries.
+      # Runs tsc via npm run build, then the whole suite including the tests
+      # that drive the real server binary and the restore CLI.
       - run: npm test

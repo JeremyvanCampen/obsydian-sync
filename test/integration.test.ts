@@ -11,8 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,16 +29,12 @@ import {
   verifyKdfCheck,
 } from "../src/crypto.ts";
 import { prepareEntry, replay } from "../src/journal.ts";
+import { type RunningServer, startServer } from "./server-harness.ts";
 
 const BIN = fileURLToPath(new URL("../target/debug/obsydian-sync-server", import.meta.url));
 const TOKEN = "integration-test-token";
-// A fresh port per run. A fixed one collides with a previous run whose server
-// has exited but whose port the OS still holds, which shows up as an
-// intermittent, baffling failure rather than an obvious one.
-const PORT = 20000 + Math.floor(Math.random() * 20000);
-const BASE = `http://127.0.0.1:${PORT}`;
 
-let server: ChildProcess;
+let server: RunningServer;
 let dataDir: string;
 let api: SyncApi;
 let keys: VaultKeys;
@@ -64,56 +59,20 @@ const nodeTransport: Transport = async (req) => {
 };
 
 beforeAll(async () => {
-  if (!existsSync(BIN)) {
-    throw new Error(
-      `The sync server binary is missing at ${BIN}.\n` +
-        `Run: cargo build --package obsydian-sync-server\n` +
-        `(\`npm test\` does this for you via the pretest script.)`,
-    );
-  }
-  const digest = execFileSync(BIN, ["--hash-token"], { input: TOKEN, encoding: "utf8" }).trim();
-
   dataDir = mkdtempSync(join(tmpdir(), "obsydian-integration-"));
-  const configPath = join(dataDir, "config.toml");
-  writeFileSync(
-    configPath,
-    [
-      `bind = "127.0.0.1:${PORT}"`,
-      `data_dir = "${join(dataDir, "data")}"`,
-      "",
-      "[[devices]]",
-      'id = "macbook"',
-      `token_sha256 = "${digest}"`,
-      "",
-    ].join("\n"),
-  );
+  server = await startServer({
+    binary: BIN,
+    dataDir: join(dataDir, "data"),
+    configDir: dataDir,
+    devices: { macbook: TOKEN },
+  });
 
-  // stderr is kept: a failed bind is otherwise invisible, and the readiness
-  // loop below would happily succeed against whatever already owns the port —
-  // including a leftover server from a previous run, which shares this token
-  // and would make every head-relative assertion run against stale state.
-  server = spawn(BIN, [configPath], { stdio: ["ignore", "ignore", "pipe"] });
-  let stderr = "";
-  server.stderr?.on("data", (chunk) => (stderr += String(chunk)));
-
-  let died: string | null = null;
-  server.on("exit", (code) => (died = `server exited with code ${code}: ${stderr}`));
-
-  let ready = false;
-  for (let i = 0; i < 200 && !ready; i++) {
-    if (died) throw new Error(died);
-    try {
-      ready = (await fetch(`${BASE}/health`)).ok;
-    } catch {
-      // not up yet
-    }
-    if (!ready) await new Promise((r) => setTimeout(r, 25));
-  }
-  if (!ready) {
-    throw new Error(`server did not become healthy on ${BASE}. stderr: ${stderr || "(none)"}`);
-  }
-
-  api = new SyncApi({ baseUrl: BASE, token: TOKEN, transport: nodeTransport, sleep: async () => {} });
+  api = new SyncApi({
+    baseUrl: server.baseUrl,
+    token: TOKEN,
+    transport: nodeTransport,
+    sleep: async () => {},
+  });
 
   const meta = await api.meta();
   keys = await deriveKeys(await deriveMasterKey("integration passphrase", meta.kdf));
@@ -121,21 +80,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  // Wait for the process to actually exit before deleting its data directory,
-  // and before another run could try to claim the port.
-  if (server && server.exitCode === null) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        server.kill("SIGKILL");
-        resolve();
-      }, 5000);
-      server.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      server.kill("SIGTERM");
-    });
-  }
+  await server?.stop();
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -314,7 +259,7 @@ describe("journal", () => {
     // fits in one response, the loop body runs once, and the cursor-advance and
     // stall guard inside journalAll are never executed at all.
     const small = new SyncApi({
-      baseUrl: BASE,
+      baseUrl: server.baseUrl,
       token: TOKEN,
       transport: nodeTransport,
       sleep: async () => {},
@@ -349,7 +294,7 @@ describe("journal", () => {
 describe("errors the client has to interpret", () => {
   it("surfaces the server's error code on a bad token", async () => {
     const bad = new SyncApi({
-      baseUrl: BASE,
+      baseUrl: server.baseUrl,
       token: "not-a-real-token",
       transport: nodeTransport,
       sleep: async () => {},
@@ -361,7 +306,7 @@ describe("errors the client has to interpret", () => {
   it("does not retry a 4xx", async () => {
     let attempts = 0;
     const counting = new SyncApi({
-      baseUrl: BASE,
+      baseUrl: server.baseUrl,
       token: "not-a-real-token",
       sleep: async () => {},
       transport: async (req) => {

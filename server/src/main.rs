@@ -72,7 +72,12 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    tracing::info!(%bind, "obsydian-sync-server listening");
+
+    // The *resolved* address, not the configured one. With port 0 the config
+    // says "0" and only the OS knows the answer, so logging the config value
+    // would leave a caller no way to find the server it just started.
+    let local = listener.local_addr().unwrap_or(bind);
+    tracing::info!(%local, "obsydian-sync-server listening");
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
