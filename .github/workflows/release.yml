@@ -1,0 +1,51 @@
+# Builds the plugin and publishes main.js + manifest.json as release assets.
+#
+# BRAT installs from the latest GitHub release, so a tag with no release
+# attached means BRAT has nothing to fetch and users see no update.
+#
+#   npm version patch          # bumps manifest.json via the version script
+#   git push && git push --tags
+
+name: Release
+
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm ci
+
+      # Typecheck and unit tests only: the integration tests need the Rust
+      # server binary, which is checked separately.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: node esbuild.config.mjs production
+
+      - name: Check the tag matches manifest.json
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "tag $TAG does not match manifest.json version $MANIFEST" >&2
+            exit 1
+          fi
+
+      - name: Publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF#refs/tags/}" main.js manifest.json --generate-notes
