@@ -1,0 +1,25 @@
+[package]
+name = "obsydian-sync-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true
+axum = "0.8.9"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "fs", "signal", "process"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+toml = "1.1.5"
+rand = "0.10.2"
+subtle = "2.6.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,26 @@
+{
+  "name": "obsydian-sync",
+  "version": "0.1.0",
+  "description": "Self-hosted, end-to-end encrypted Obsidian vault sync.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && vitest run",
+    "test:watch": "npm run build:server && vitest",
+    "vectors": "node scripts/gen-vectors.ts",
+    "pretest": "npm run build:server",
+    "build:server": "cargo build --package obsydian-sync-server --package obsydian-restore"
+  },
+  "keywords": [],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "esbuild": "^0.28.2",
+    "obsidian": "^1.13.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}

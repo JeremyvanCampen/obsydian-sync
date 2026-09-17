@@ -1,0 +1,23 @@
+[package]
+name = "obsydian-restore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+aes-gcm.workspace = true
+pbkdf2.workspace = true
+hkdf.workspace = true
+clap = { version = "4.6.6", features = ["derive"] }
+rpassword = "7.5.4"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tempfile = "3.27.0"

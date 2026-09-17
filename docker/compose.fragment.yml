@@ -1,0 +1,39 @@
+# Add this service to ~/docker-stack/docker-compose.yml.
+#
+# Read the binding before anything else. Per [[Access and security]] §4 and
+# [[Agent guide]] §4: Docker writes its own DNAT rules into nat/PREROUTING,
+# which are evaluated before UFW's INPUT chain, so a published port is
+# reachable regardless of what `ufw status` says. The bind address is the only
+# control that works.
+#
+# "100.x.y.z:8787:8787" -> reachable only from Tailscale devices.
+# "8787:8787"              -> reachable from the entire LAN. Do not.
+#
+# This service must NOT get an Nginx Proxy Manager host. Public proxy hosts stay
+# exactly two: jellyfin and requests. An NPM entry publishes to the internet
+# with no router change and no confirmation.
+
+  obsydian-sync:
+    # Built and tagged on the server first (see SETUP.md §3):
+    #   cd ~/obsydian-sync && docker build -f docker/Dockerfile -t obsydian-sync:latest .
+    image: obsydian-sync:latest
+    # To build from compose instead, the context is the repo root and the
+    # Dockerfile is not at that root, so both have to be named:
+    # build:
+    #   context: ~/obsydian-sync
+    #   dockerfile: docker/Dockerfile
+    container_name: obsydian-sync
+    ports:
+      - "100.x.y.z:8787:8787"   # tailnet only — see above
+    volumes:
+      # Under appdata, so the existing your backup tool job backs it up nightly to
+      # /mnt/series/your backup tool and to off-site storage with the rest of the stack.
+      - /mnt/docker/appdata/obsydian-sync/data:/data
+      - /mnt/docker/appdata/obsydian-sync/config:/config:ro
+    environment:
+      - TZ=Europe/Amsterdam
+      - RUST_LOG=obsydian_sync_server=info
+    restart: unless-stopped
+    # Longer than [git] debounce_secs, so a stop has time to make its final
+    # commit rather than being SIGKILLed part-way through one.
+    stop_grace_period: 45s

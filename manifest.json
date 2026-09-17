@@ -1,0 +1,9 @@
+{
+  "id": "obsydian-sync",
+  "name": "Obsydian Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Self-hosted, end-to-end encrypted vault sync across desktop and mobile.",
+  "author": "Jeremy van Campen",
+  "isDesktopOnly": false
+}

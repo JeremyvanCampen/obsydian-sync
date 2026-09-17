@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+main.js
+main.js.map
+
+# Local dev / secrets
+*.local.toml
+config.toml
+.env
+/scratch/
+
+# OS
+.DS_Store
+
+# Local deployment notes: addresses, tokens, anything site-specific.
+DEPLOYMENT.local.md
+*.local.md

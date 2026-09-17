@@ -1,0 +1,38 @@
+# Copy to config.toml and fill in. config.toml is gitignored: it holds token
+# digests, and the data dir path is deployment-specific.
+
+# Inside the container this must be 0.0.0.0 — the host's own Tailscale address
+# does not exist in the container's network namespace, and binding it there
+# fails with "Cannot assign requested address".
+#
+# Restricting exposure is the *compose* file's job, not this one:
+#   ports: ["100.x.y.z:8787:8787"]   <- tailnet only
+#   ports: ["8787:8787"]                <- the entire LAN. Do not.
+bind = "0.0.0.0:8787"
+data_dir = "/data"
+
+[limits]
+max_blob_bytes = 104857600   # 100 MiB
+max_payload_bytes = 65536    # 64 KiB per journal entry
+max_batch_entries = 1000
+gc_grace_secs = 86400        # never collect blobs younger than this (24h)
+
+[git]
+# Commit the data dir after writes settle, for the GitLab mirror.
+enabled = false
+debounce_secs = 30
+
+# One entry per device. Generate a token with a password manager, then:
+#   printf '%s' '<token>' | obsydian-sync-server --hash-token
+# and paste the digest here. The plaintext token goes only into the device.
+#
+# The id becomes the deviceId on the wire — it appears in journal entries and in
+# conflict filenames, so use something you will recognize months from now.
+
+[[devices]]
+id = "macbook"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[devices]]
+id = "iphone"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
