@@ -12,6 +12,7 @@
 import type { VaultAdapter } from "../src/adapter.ts";
 import { type HttpRequest, type HttpResponse, SyncApi, type Transport } from "../src/api.ts";
 import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
+import { replay } from "../src/journal.ts";
 import type { KdfParams } from "../src/types.ts";
 
 /**
@@ -290,4 +291,14 @@ export async function initializedFakeVault(
 /** A client for the fake server, with retries that do not actually wait. */
 export function fakeApi(server: FakeServer, token: string): SyncApi {
   return new SyncApi({ baseUrl: "http://fake", token, transport: server.transportFor(token), sleep: async () => {} });
+}
+
+/**
+ * Every path the server has ever been told about, decrypted. The only sound way
+ * to ask "did a device publish this?": another device's view of the vault
+ * applies its own exclusions, so it can hide exactly the leak being tested for.
+ */
+export async function publishedPaths(server: FakeServer, keys: VaultKeys): Promise<string[]> {
+  const { index } = await replay(server.journal, keys);
+  return [...index.keys()].sort();
 }

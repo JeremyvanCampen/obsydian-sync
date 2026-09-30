@@ -15,7 +15,7 @@ import { DEFAULT_LAYOUT, statePath, vaultLayout } from "../src/layout.ts";
 const STATE_PATH = statePath(DEFAULT_LAYOUT);
 import { runSync } from "../src/sync.ts";
 import type { BaseIndex, BaseState } from "../src/types.ts";
-import { FakeAdapter, type FakeServer, fakeApi, initializedFakeVault } from "./fakes.ts";
+import { FakeAdapter, type FakeServer, fakeApi, initializedFakeVault, publishedPaths } from "./fakes.ts";
 
 const utf8 = new TextEncoder();
 const vault = () => initializedFakeVault("pw");
@@ -576,33 +576,62 @@ describe("a conflict applies all of its effects or none of them", () => {
   });
 });
 
-describe("a vault with a custom config folder keeps the plugin's own state private", () => {
+describe("no device's private config files are ever published", () => {
+  // Assertions are on what the server received, decrypted — not on another
+  // device's view, which applies its own exclusions and so could hide a leak.
   const mobile = vaultLayout(".obsidian-mobile");
+  const PRIVATE = /(^|\/)workspace(-mobile)?\.json$|plugins\/obsydian-sync\//;
 
-  it("writes state where the plugin lives and never publishes it", async () => {
+  it("a phone on a custom config folder publishes none of its own", async () => {
     const { server, keys } = await vault();
-    const a = new FakeAdapter();
-    const b = new FakeAdapter();
-    a.put("note.md", "hello");
-    a.put(".obsidian-mobile/app.json", "{}");
-    a.put(".obsidian-mobile/workspace-mobile.json", "{\"per\":\"device\"}");
-    a.put(".obsidian-mobile/plugins/obsydian-sync/data.json", "{\"secretNamespace\":\"x\"}");
+    const phone = new FakeAdapter();
+    phone.put("note.md", "hello");
+    phone.put(".obsidian-mobile/app.json", "{}");
+    phone.put(".obsidian-mobile/workspace-mobile.json", "{}");
+    phone.put(".obsidian-mobile/plugins/obsydian-sync/data.json", "{}");
 
-    const sync = (adapter: FakeAdapter, token: string) =>
-      runSync({ adapter, api: fakeApi(server, token), keys, layout: mobile, includeVaultConfig: true });
+    await runSync({ adapter: phone, api: fakeApi(server, "token-a"), keys, layout: mobile, includeVaultConfig: true });
+    await runSync({ adapter: phone, api: fakeApi(server, "token-a"), keys, layout: mobile, includeVaultConfig: true });
 
-    await sync(a, "token-a");
-    await sync(a, "token-a");
+    const published = await publishedPaths(server, keys);
+    expect(published).toEqual([".obsidian-mobile/app.json", "note.md"]);
+    // State lands in the plugin's real folder, where the next load finds it.
+    expect(phone.files.has(statePath(mobile))).toBe(true);
+  });
 
-    // State lands in the plugin's real folder, where the next load will find it.
-    expect(a.files.has(statePath(mobile))).toBe(true);
-    expect(a.files.has(statePath(DEFAULT_LAYOUT))).toBe(false);
+  it("never publishes a leftover copy of this plugin in another config folder", async () => {
+    // e.g. state left under .obsidian by an earlier setup, on a device that has
+    // since moved to .obsidian-mobile. Before, only the device's *own* plugin
+    // folder was excluded, so this was ordinary content and would be pushed.
+    const { server, keys } = await vault();
+    const phone = new FakeAdapter();
+    phone.put(".obsidian/plugins/obsydian-sync/state.json", "{\"stale\":true}");
+    phone.put(".obsidian/plugins/obsydian-sync/data.json", "{}");
+    phone.put(".obsidian/workspace.json", "{}");
+    phone.put("note.md", "hello");
 
-    // And another device receives the shareable config but none of the private files.
-    await sync(b, "token-b");
-    expect(b.text("note.md")).toBe("hello");
-    expect(b.text(".obsidian-mobile/app.json")).toBe("{}");
-    expect(b.files.has(".obsidian-mobile/workspace-mobile.json")).toBe(false);
-    expect([...b.files.keys()].filter((p) => p.startsWith(".obsidian-mobile/plugins/obsydian-sync/") && p !== statePath(mobile))).toEqual([]);
+    await runSync({ adapter: phone, api: fakeApi(server, "token-a"), keys, layout: mobile, includeVaultConfig: true });
+
+    const published = await publishedPaths(server, keys);
+    expect(published.filter((p) => PRIVATE.test(p))).toEqual([]);
+    expect(published).toContain("note.md");
+  });
+
+  it("with vault settings off, a phone keeps the desktop's config folder out too", async () => {
+    // Desktop on .obsidian with vault settings on; phone on .obsidian-mobile
+    // with them off. The phone must not download the desktop's plugin code,
+    // hotkeys and other plugins' data as if they were notes.
+    const { server, keys } = await vault();
+    const desktop = new FakeAdapter();
+    desktop.put(".obsidian/app.json", "{}");
+    desktop.put(".obsidian/plugins/other-plugin/data.json", "{}");
+    desktop.put("note.md", "hello");
+    await runSync({ adapter: desktop, api: fakeApi(server, "token-a"), keys, layout: DEFAULT_LAYOUT, includeVaultConfig: true });
+
+    const phone = new FakeAdapter();
+    await runSync({ adapter: phone, api: fakeApi(server, "token-b"), keys, layout: mobile, includeVaultConfig: false });
+
+    expect(phone.text("note.md")).toBe("hello");
+    expect([...phone.files.keys()].filter((p) => p.startsWith(".obsidian/"))).toEqual([]);
   });
 });

@@ -370,6 +370,20 @@ Three invariants that the implementation must not quietly break:
    them: a client that assumed `.obsidian` on a vault using another folder would
    exclude nothing of its own and publish its base state to every device.
 
+   Because devices can use *different* config folders in one vault, a client
+   **MUST** also recognise config folders it does not own — `.obsidian` and the
+   `.obsidian-*` / `.obsidian.*` names used per device — and apply two rules to
+   every one of them:
+
+   - Per-device files never sync, in any config folder: `workspace.json`,
+     `workspace-mobile.json`, and this plugin's folder `plugins/obsydian-sync/`
+     (which holds a device's base state). A client that protected only its own
+     folder would publish a copy left in another, such as the one an earlier
+     setup left behind after the device changed folders.
+   - When the user turns syncing of vault settings off, *every* recognised
+     config folder stays out — not only this device's. Otherwise a device on
+     `.obsidian-mobile` downloads another device's `.obsidian` as notes.
+
 ### 6.1 Untracked paths
 
 A path with no base entry has never been synced by this device. With no base,

@@ -14,7 +14,7 @@ import type { VaultAdapter } from "./adapter.ts";
 import type { Bytes, VaultKeys } from "./crypto.ts";
 import { blobIdFor } from "./crypto.ts";
 import type { BaseIndex, LocalFile, LocalIndex } from "./types.ts";
-import type { VaultLayout } from "./layout.ts";
+import { PLUGIN_ID, type VaultLayout } from "./layout.ts";
 
 /**
  * Paths never synced, whatever the settings say.
@@ -28,17 +28,22 @@ import type { VaultLayout } from "./layout.ts";
  * - `.trash` is where a wrong deletion goes to stay recoverable. Syncing it
  *   would propagate the deletion it exists to protect against.
  */
-export function alwaysExcluded(layout: VaultLayout): string[] {
-  return [
-    `${layout.configDir}/workspace.json`,
-    `${layout.configDir}/workspace-mobile.json`,
-    `${layout.pluginDir}/`,
-    ".trash/",
-    ".git/",
-    ".DS_Store",
-    "*.tmp",
-  ];
-}
+export const ALWAYS_EXCLUDED: readonly string[] = [".trash/", ".git/", ".DS_Store", "*.tmp"];
+
+/**
+ * Matches the names Obsidian config folders take: the default `.obsidian`, and
+ * the `.obsidian-mobile` / `.obsidian.ipad` style people use per device.
+ *
+ * A device cannot know what folder another device uses, so this is a naming
+ * convention rather than a certainty. That is enough for what it protects:
+ * missing an oddly named folder only means it syncs as ordinary content, and
+ * the private files inside the one that matters most — this device's own — are
+ * excluded by exact path regardless.
+ */
+const CONFIG_FOLDER_NAME = /^\.obsidian(?:[-_.][\w.-]+)?$/;
+
+/** Files in a config folder that describe one device and must never travel. */
+const PRIVATE_IN_CONFIG = ["workspace.json", "workspace-mobile.json"];
 
 export interface ScanOptions {
   adapter: VaultAdapter;
@@ -118,18 +123,49 @@ export function syncScope(opts: {
   exclude?: readonly string[];
   includeVaultConfig: boolean;
 }): SyncScope {
-  const { configDir } = opts.layout;
+  const { configDir, pluginDir } = opts.layout;
   const patterns = [
-    ...alwaysExcluded(opts.layout),
+    ...ALWAYS_EXCLUDED,
     ...(opts.exclude ?? []).map(normalizeExcludePattern).filter((p) => p.length > 0),
   ];
-  const outsideConfig = (path: string): boolean =>
-    !opts.includeVaultConfig && (path === configDir || path.startsWith(`${configDir}/`));
+  const under = (path: string, dir: string) => path === dir || path.startsWith(`${dir}/`);
+
+  /** The config folder `path` lives in — this device's or another's — or null. */
+  const configFolderOf = (path: string): string | null => {
+    if (under(path, configDir)) return configDir;
+    const first = path.split("/", 1)[0] ?? path;
+    return CONFIG_FOLDER_NAME.test(first) ? first : null;
+  };
+
+  /**
+   * Never synced, whichever device's config folder it is in: another device's
+   * copy of this plugin holds that device's base state and settings, and its
+   * workspace files describe its windows. Each device used to protect only its
+   * own folder, so a phone on ".obsidian-mobile" would happily publish a stale
+   * ".obsidian/plugins/obsydian-sync/state.json" left behind by an earlier setup.
+   */
+  const isPrivate = (path: string): boolean => {
+    if (under(path, pluginDir)) return true;
+    const folder = configFolderOf(path);
+    if (folder === null) return false;
+    const rest = path.slice(folder.length + 1);
+    return PRIVATE_IN_CONFIG.includes(rest) || under(rest, `plugins/${PLUGIN_ID}`);
+  };
+
+  /**
+   * With vault settings off, *every* recognisable config folder stays out — not
+   * only this device's. Otherwise a phone on ".obsidian-mobile" would download
+   * the desktop's whole ".obsidian" (plugin code, other plugins' data) as notes.
+   */
+  const outsideConfig = (path: string): boolean => !opts.includeVaultConfig && configFolderOf(path) !== null;
 
   return {
-    includes: (path) => !outsideConfig(path) && !isExcludedPath(path, patterns),
+    includes: (path) => !isPrivate(path) && !outsideConfig(path) && !isExcludedPath(path, patterns),
     descends: (folder) =>
-      !outsideConfig(folder) && !isExcluded(folder, patterns) && !isExcluded(`${folder}/`, patterns),
+      !isPrivate(folder) &&
+      !outsideConfig(folder) &&
+      !isExcluded(folder, patterns) &&
+      !isExcluded(`${folder}/`, patterns),
   };
 }
 

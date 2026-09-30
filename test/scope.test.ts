@@ -89,3 +89,19 @@ describe("vaultLayout", () => {
     expect(() => vaultLayout("/")).toThrow();
   });
 });
+
+describe("recognising config folders", () => {
+  const scope = syncScope({ layout: DEFAULT_LAYOUT, includeVaultConfig: false });
+
+  it("treats the common per-device names as config", () => {
+    for (const folder of [".obsidian", ".obsidian-mobile", ".obsidian.ipad", ".obsidian_work"]) {
+      expect(scope.includes(`${folder}/app.json`), folder).toBe(false);
+    }
+  });
+
+  it("does not mistake ordinary folders for config", () => {
+    for (const path of [".obsidianx/a.md", "notes.obsidian/a.md", "obsidian/a.md", "Projects/.obsidian-notes.md"]) {
+      expect(scope.includes(path), path).toBe(true);
+    }
+  });
+});
