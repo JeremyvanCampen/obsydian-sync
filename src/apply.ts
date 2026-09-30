@@ -103,8 +103,7 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
         break;
       }
 
-      case "pull-put":
-      case "copy-remote": {
+      case "pull-put": {
         // Download first, check last: the check sits immediately before the
         // write, keeping the window for an edit to slip in as short as it can be.
         const content = await downloadBlob(api, keys, action.remote.blobId);
@@ -122,12 +121,47 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
         };
         base.set(action.path, entry);
         result.pulled++;
+        break;
+      }
 
-        if (action.kind === "copy-remote") {
-          // Reuses the blob the server already holds; nothing to upload.
-          pending.push({ op: "put", path: action.path, ...entry });
-          result.pushed++;
+      case "conflict": {
+        // All or nothing, up to the first write: both preconditions are checked
+        // before anything touches the vault, so a refusal leaves both sides
+        // exactly as they were and the next sync decides again.
+        const local = await readLocal(adapter, action.path);
+        if (!(await unchanged(action, local))) continue;
+        const remote = await downloadBlob(api, keys, action.remote.blobId);
+        // Checked last, immediately before the write, to keep the window short.
+        if (await readLocal(adapter, action.copyPath)) {
+          opts.onNote?.({
+            level: "warn",
+            path: action.path,
+            message: `conflict copy "${action.copyPath}" appeared during sync; leaving the conflict for the next run`,
+          });
+          continue;
         }
+
+        await writeLocal(adapter, action.copyPath, remote);
+        const stat = await adapter.stat(action.copyPath);
+        // What the filesystem actually gave the file, so the next scan's fast
+        // path matches rather than re-hashing it on every sync.
+        const copy = {
+          blobId: action.remote.blobId,
+          size: remote.length,
+          mtime: stat?.mtime ?? action.remote.mtime,
+        };
+        base.set(action.copyPath, copy);
+        // The copy reuses the blob the server already holds; nothing to upload.
+        pending.push({ op: "put", path: action.copyPath, ...copy });
+
+        // The bytes checked above are the bytes uploaded: no window here.
+        await uploadBlob(api, keys, action.local.blobId, local!);
+        const { blobId, size, mtime } = action.local;
+        pending.push({ op: "put", path: action.path, blobId, size, mtime });
+        base.set(action.path, { blobId, size, mtime });
+
+        result.pulled++;
+        result.pushed += 2;
         break;
       }
 

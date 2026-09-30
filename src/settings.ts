@@ -7,6 +7,8 @@ export interface ObsydianSyncSettings {
   serverUrl: string;
   // The bearer token and the passphrase are deliberately absent: they live in
   // SecretStorage, never in data.json. See secrets.ts.
+  /** Makes this vault's secret ids distinct from any other vault's. Generated once. */
+  secretNamespace: string;
   includeVaultConfig: boolean;
   exclude: string[];
   syncOnStartup: boolean;
@@ -18,6 +20,7 @@ export interface ObsydianSyncSettings {
 
 export const DEFAULT_SETTINGS: ObsydianSyncSettings = {
   serverUrl: "",
+  secretNamespace: "",
   includeVaultConfig: true,
   exclude: [],
   syncOnStartup: true,

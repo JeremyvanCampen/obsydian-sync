@@ -1,11 +1,19 @@
 import { Notice, Plugin, type TAbstractFile } from "obsidian";
 import { SyncApi } from "./api.ts";
-import { type VaultKeys, deriveKeys, deriveMasterKey, kdfProblem, makeKdfCheck, verifyKdfCheck } from "./crypto.ts";
+import {
+  type VaultKeys,
+  deriveKeys,
+  deriveMasterKey,
+  kdfProblem,
+  makeKdfCheck,
+  randomHex,
+  verifyKdfCheck,
+} from "./crypto.ts";
 import { obsidianTransport } from "./obsidian-transport.ts";
 import type { Note } from "./reconcile.ts";
 import { type SyncReason, SyncScheduler } from "./scheduler.ts";
 import { DEFAULT_SETTINGS, type ObsydianSyncSettings, ObsydianSyncSettingTab } from "./settings.ts";
-import { type SecretName, migrateLegacySecrets, readSecret, writeSecret } from "./secrets.ts";
+import { Credentials, type SecretName, isValidNamespace, migrateLegacySecrets } from "./secrets.ts";
 import { type SyncScope, syncScope } from "./scan.ts";
 import { SyncError, type SyncSummary, runSync } from "./sync.ts";
 import type { VaultMeta } from "./types.ts";
@@ -26,6 +34,8 @@ export default class ObsydianSyncPlugin extends Plugin {
   private confirmNextRun = false;
   /** Rebuilt whenever settings change; see syncScope. */
   private scope: SyncScope = syncScope(DEFAULT_SETTINGS);
+  /** Set by loadSettings, before anything reads a credential. */
+  private credentials!: Credentials;
   private statusBar: HTMLElement | null = null;
   /**
    * Derived keys, with what they were derived from. The server contributes the
@@ -107,26 +117,54 @@ export default class ObsydianSyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const saved = ((await this.loadData()) ?? {}) as Record<string, unknown>;
 
-    // Earlier versions kept the token and passphrase in data.json. Move them to
-    // secure storage, and rewrite data.json only if something actually moved.
-    const { data, migrated, failed } = migrateLegacySecrets(this.app.secretStorage, saved);
-    for (const f of failed) {
-      console.error(`[obsydian-sync] could not move the ${f.name} to secure storage:`, f.error);
-    }
-    if (migrated.length > 0) await this.saveData(data);
+    // A per-vault namespace for secret ids, created once and kept in data.json.
+    const fresh = !isValidNamespace(saved.secretNamespace);
+    const namespace = fresh ? randomHex(8) : (saved.secretNamespace as string);
 
-    this.settings = { ...DEFAULT_SETTINGS, ...(data as Partial<ObsydianSyncSettings>) };
+    // Earlier versions kept the token and passphrase in data.json. Move them to
+    // secure storage, and rewrite data.json whenever anything was removed —
+    // including plaintext the store already holds.
+    const result = migrateLegacySecrets(
+      this.app.secretStorage,
+      { ...saved, secretNamespace: namespace },
+      namespace,
+    );
+    if (result.changed || fresh) await this.saveData(result.data);
+
+    this.credentials = new Credentials(this.app.secretStorage, namespace, result.fallback);
+
+    if (result.failed.length > 0) {
+      for (const f of result.failed) {
+        console.error(`[obsydian-sync] could not move the ${f.name} to secure storage:`, f.error);
+      }
+      // Not silent: the plugin keeps syncing on the credentials it had, but the
+      // user should know they are still in plain text in data.json.
+      new Notice(
+        "Obsydian Sync could not move your credentials to secure storage, so they are still " +
+          "stored in plain text in the plugin's data.json. Syncing continues. See the console for details.",
+        15000,
+      );
+    }
+
+    this.settings = { ...DEFAULT_SETTINGS, ...(result.data as Partial<ObsydianSyncSettings>) };
     this.scope = syncScope(this.settings);
   }
 
   getSecret(name: SecretName): string {
-    return readSecret(this.app.secretStorage, name);
+    return this.credentials.get(name);
   }
 
   setSecret(name: SecretName, value: string): void {
-    writeSecret(this.app.secretStorage, name, value);
-    // A changed credential invalidates the derived keys; the cache key would
-    // catch it too, but there is no reason to hold stale keys until then.
+    try {
+      this.credentials.set(name, value);
+    } catch (e) {
+      // Typed into the settings tab: dropping it without a word would leave the
+      // user believing it was saved.
+      console.error(`[obsydian-sync] could not save the ${name}:`, e);
+      new Notice(`Obsydian Sync could not save the ${name} to secure storage.`, 10000);
+      return;
+    }
+    // A changed credential invalidates the derived keys.
     if (name === "passphrase") this.cachedKeys = null;
   }
 

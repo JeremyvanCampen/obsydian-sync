@@ -148,15 +148,27 @@ describe("a real vault through the real stack", () => {
     const MIN_NEEDLE_BYTES = 6;
     const store_bytes = Buffer.concat([...snapshot(store).values()]);
 
-    const needles = FILES.flatMap(([path, content]) => [
-      path,
-      ...(typeof content === "string" ? content.split("\n") : []),
-    ])
-      .map((n) => n.trim())
-      .filter((n) => Buffer.byteLength(n, "utf8") >= MIN_NEEDLE_BYTES);
+    // Every whole path, every folder and file name within it, each file name
+    // without its extension, and every line of text content. A server that
+    // leaked only "Standup" or "Meetings" — not the full path — must fail too.
+    const needles = [
+      ...new Set(
+        FILES.flatMap(([path, content]) => {
+          const segments = path.split("/");
+          const stems = segments.map((s) => s.replace(/\.[^.]+$/, ""));
+          const lines = typeof content === "string" ? content.split("\n") : [];
+          return [path, ...segments, ...stems, ...lines];
+        })
+          .map((n) => n.trim())
+          .filter((n) => Buffer.byteLength(n, "utf8") >= MIN_NEEDLE_BYTES),
+      ),
+    ];
 
     // Guard against the check silently shrinking to nothing.
-    expect(needles.length).toBeGreaterThanOrEqual(10);
+    expect(needles.length).toBeGreaterThanOrEqual(20);
+    // The name-only needles are the point of the extra coverage; be sure they
+    // are really in the set rather than filtered out by the length floor.
+    for (const name of ["Standup", "Meetings", "Groceries", "Café niños"]) expect(needles).toContain(name);
 
     for (const needle of needles) {
       expect(store_bytes.includes(Buffer.from(needle, "utf8")), `server holds the plaintext "${needle}"`).toBe(false);

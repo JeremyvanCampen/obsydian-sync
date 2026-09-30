@@ -505,3 +505,67 @@ describe("every action that touches a file re-checks it immediately before actin
     expect(base.has("note.md")).toBe(true);
   });
 });
+
+describe("a conflict applies all of its effects or none of them", () => {
+  // Split into two actions, a refused conflict copy still let the push through:
+  // the local version replaced the remote one at the original path, the other
+  // device pulled it as an ordinary edit, and its own version was overwritten.
+
+  async function conflictPlan() {
+    const { server, keys } = await vault();
+    const adapter = new FakeAdapter();
+    const api = fakeApi(server, "token-a");
+
+    const remoteBytes = utf8.encode("the other device's version") as Bytes;
+    const remoteId = await blobIdFor(keys, remoteBytes);
+    await api.putBlob(remoteId, await seal(keys.content, remoteBytes, aadForBlob(remoteId)));
+
+    adapter.put("note.md", "this device's version");
+    const localId = await blobIdFor(keys, utf8.encode("this device's version") as Bytes);
+
+    const action = {
+      kind: "conflict" as const,
+      path: "note.md",
+      copyPath: "note (conflict from iphone).md",
+      local: { path: "note.md", blobId: localId, size: 21, mtime: adapter.clock },
+      remote: { state: "present" as const, blobId: remoteId, size: remoteBytes.length, mtime: 1, seq: 1, deviceId: "iphone" },
+      expect: { blobId: localId },
+    };
+    return { server, keys, adapter, api, action };
+  }
+
+  it("pushes nothing when something appears at the copy path mid-sync", async () => {
+    const { server, keys, adapter, api, action } = await conflictPlan();
+    adapter.put(action.copyPath, "an unrelated file that landed on that name"); // after the scan
+
+    const base: BaseIndex = new Map();
+    const result = await applyPlan({ adapter, api, keys, deviceId: "macbook", base, plan: { actions: [action], notes: [] } });
+
+    // Nothing journalled: the remote version is still the live one at note.md.
+    expect(server.journal).toHaveLength(0);
+    expect(result.pushed).toBe(0);
+    expect(base.size).toBe(0);
+    // And nothing local was touched.
+    expect(adapter.text("note.md")).toBe("this device's version");
+    expect(adapter.text(action.copyPath)).toBe("an unrelated file that landed on that name");
+  });
+
+  it("pushes nothing when the local file changed after the scan", async () => {
+    const { server, keys, adapter, api, action } = await conflictPlan();
+    adapter.put("note.md", "typed during the sync");
+
+    await applyPlan({ adapter, api, keys, deviceId: "macbook", base: new Map(), plan: { actions: [action], notes: [] } });
+
+    expect(server.journal).toHaveLength(0);
+    expect(adapter.files.has(action.copyPath)).toBe(false);
+  });
+
+  it("does both halves when nothing changed", async () => {
+    const { server, keys, adapter, api, action } = await conflictPlan();
+    await applyPlan({ adapter, api, keys, deviceId: "macbook", base: new Map(), plan: { actions: [action], notes: [] } });
+
+    expect(server.journal).toHaveLength(2);
+    expect(adapter.text(action.copyPath)).toBe("the other device's version");
+    expect(adapter.text("note.md")).toBe("this device's version");
+  });
+});

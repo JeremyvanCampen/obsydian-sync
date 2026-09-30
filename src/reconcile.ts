@@ -36,11 +36,23 @@ export type Action =
   /** Download and write the remote content. */
   | { kind: "pull-put"; path: string; remote: RemotePresent; expect: Expect }
   /**
-   * Write the remote content to a new path *and* journal that path — a conflict
-   * copy. One action, so its journal entry comes from the file it just wrote
-   * rather than from a guess about what an earlier action recorded.
+   * Both sides changed `path` to different content. Keep the local version at
+   * `path`, write the remote version to `copyPath`, and journal both.
+   *
+   * One action because its two halves must happen together or not at all.
+   * Split in two, a refused copy (something appeared at `copyPath` mid-sync)
+   * would still let the push go ahead — replacing the remote version at `path`,
+   * which the other device then pulls as an ordinary edit, overwriting its own.
+   * `expect` is for `path`; `copyPath` must not exist.
    */
-  | { kind: "copy-remote"; path: string; remote: RemotePresent; expect: Expect }
+  | {
+      kind: "conflict";
+      path: string;
+      copyPath: string;
+      local: LocalFile;
+      remote: RemotePresent;
+      expect: Expect;
+    }
   /** Move the local file to `.trash` — only ever against a real tombstone. */
   | { kind: "pull-delete"; path: string; remote: RemoteTombstone; expect: Expect }
   /** Both sides already agree; record it in base and touch nothing. */
@@ -361,10 +373,14 @@ export function reconcile(input: ReconcileInput): Plan {
     const origin = r.deviceId ?? "another device";
     const conflictPath = allocateConflictPath(path, origin, now, taken);
 
-    // Write the remote version beside the local one and journal it...
-    actions.push({ kind: "copy-remote", path: conflictPath, remote: r, expect: "absent" });
-    // ...and push the local version at its original path.
-    actions.push({ kind: "push-put", path, local: l, expect: { blobId: l.blobId } });
+    actions.push({
+      kind: "conflict",
+      path,
+      copyPath: conflictPath,
+      local: l,
+      remote: r,
+      expect: { blobId: l.blobId },
+    });
 
     notes.push({ level: "warn", path, message: `${why}; remote version kept as "${conflictPath}"` });
   }
