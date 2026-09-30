@@ -14,7 +14,7 @@ import type { VaultAdapter } from "./adapter.ts";
 import type { Bytes, VaultKeys } from "./crypto.ts";
 import { blobIdFor } from "./crypto.ts";
 import type { BaseIndex, LocalFile, LocalIndex } from "./types.ts";
-import { PLUGIN_DIR } from "./state.ts";
+import type { VaultLayout } from "./layout.ts";
 
 /**
  * Paths never synced, whatever the settings say.
@@ -28,15 +28,17 @@ import { PLUGIN_DIR } from "./state.ts";
  * - `.trash` is where a wrong deletion goes to stay recoverable. Syncing it
  *   would propagate the deletion it exists to protect against.
  */
-export const ALWAYS_EXCLUDED: readonly string[] = [
-  ".obsidian/workspace.json",
-  ".obsidian/workspace-mobile.json",
-  `${PLUGIN_DIR}/`,
-  ".trash/",
-  ".git/",
-  ".DS_Store",
-  "*.tmp",
-];
+export function alwaysExcluded(layout: VaultLayout): string[] {
+  return [
+    `${layout.configDir}/workspace.json`,
+    `${layout.configDir}/workspace-mobile.json`,
+    `${layout.pluginDir}/`,
+    ".trash/",
+    ".git/",
+    ".DS_Store",
+    "*.tmp",
+  ];
+}
 
 export interface ScanOptions {
   adapter: VaultAdapter;
@@ -95,9 +97,6 @@ export function isExcludedPath(path: string, patterns: readonly string[]): boole
   return false;
 }
 
-/** The vault's config folder. Named once; see the note on syncScope. */
-export const CONFIG_DIR = ".obsidian";
-
 /**
  * The single answer to "does this path take part in sync?".
  *
@@ -115,15 +114,17 @@ export interface SyncScope {
 }
 
 export function syncScope(opts: {
+  layout: VaultLayout;
   exclude?: readonly string[];
   includeVaultConfig: boolean;
 }): SyncScope {
+  const { configDir } = opts.layout;
   const patterns = [
-    ...ALWAYS_EXCLUDED,
+    ...alwaysExcluded(opts.layout),
     ...(opts.exclude ?? []).map(normalizeExcludePattern).filter((p) => p.length > 0),
   ];
   const outsideConfig = (path: string): boolean =>
-    !opts.includeVaultConfig && (path === CONFIG_DIR || path.startsWith(`${CONFIG_DIR}/`));
+    !opts.includeVaultConfig && (path === configDir || path.startsWith(`${configDir}/`));
 
   return {
     includes: (path) => !outsideConfig(path) && !isExcludedPath(path, patterns),

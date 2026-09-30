@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { SyncApi } from "../src/api.ts";
+import { DEFAULT_LAYOUT } from "../src/layout.ts";
 import { type VaultKeys, deriveKeys, deriveMasterKey } from "../src/crypto.ts";
 import { runSync } from "../src/sync.ts";
 import type { SyncSummary } from "../src/sync.ts";
@@ -34,6 +35,7 @@ class Device {
       adapter: this.adapter,
       api: this.api,
       keys,
+      layout: DEFAULT_LAYOUT,
       includeVaultConfig: false,
       confirmMassDeletion: opts.confirmMassDeletion,
     });

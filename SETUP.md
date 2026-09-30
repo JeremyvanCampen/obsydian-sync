@@ -192,7 +192,8 @@ tailscale lock sign nodekey:<from the admin console Machines page>
 ```
 
 Then on each device, copy `main.js` and `manifest.json` into
-`<vault>/.obsidian/plugins/obsydian-sync/`, enable it, and set the server to
+`<vault>/.obsidian/plugins/obsydian-sync/` (or the `plugins/` folder inside your
+vault's config folder, if you have changed it in Obsidian), enable it, and set the server to
 `http://100.x.y.z:8787` with **that device's own token** and the same
 passphrase.
 

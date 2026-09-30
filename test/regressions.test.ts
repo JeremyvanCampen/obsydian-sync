@@ -9,7 +9,10 @@ import { SyncApi } from "../src/api.ts";
 import { HEAD_BEFORE_PUT_BYTES, applyPlan } from "../src/apply.ts";
 import { type VaultKeys, aadForBlob, blobIdFor, seal } from "../src/crypto.ts";
 import type { Bytes } from "../src/crypto.ts";
-import { ensureDir, loadState, saveState, STATE_PATH } from "../src/state.ts";
+import { ensureDir, loadState, saveState } from "../src/state.ts";
+import { DEFAULT_LAYOUT, statePath, vaultLayout } from "../src/layout.ts";
+
+const STATE_PATH = statePath(DEFAULT_LAYOUT);
 import { runSync } from "../src/sync.ts";
 import type { BaseIndex, BaseState } from "../src/types.ts";
 import { FakeAdapter, type FakeServer, fakeApi, initializedFakeVault } from "./fakes.ts";
@@ -23,7 +26,7 @@ function device(server: FakeServer, keys: VaultKeys, token: string, exclude: str
   return {
     adapter,
     api,
-    sync: () => runSync({ adapter, api, keys, includeVaultConfig, exclude }),
+    sync: () => runSync({ adapter, api, keys, layout: DEFAULT_LAYOUT, includeVaultConfig, exclude }),
   };
 }
 
@@ -100,7 +103,7 @@ describe("excluding a path forgets it locally without deleting it anywhere", () 
     // A now excludes that folder.
     const aExcluding = {
       adapter: a.adapter,
-      sync: () => runSync({ adapter: a.adapter, api: a.api, keys, includeVaultConfig: false, exclude: ["Work/"] }),
+      sync: () => runSync({ adapter: a.adapter, api: a.api, keys, layout: DEFAULT_LAYOUT, includeVaultConfig: false, exclude: ["Work/"] }),
     };
     await aExcluding.sync();
 
@@ -125,7 +128,7 @@ describe("excluding a path forgets it locally without deleting it anywhere", () 
     expect(b.adapter.text(".obsidian/app.json")).toBe("{}");
 
     // Same device, config syncing now off.
-    await runSync({ adapter: withConfig.adapter, api: withConfig.api, keys, includeVaultConfig: false });
+    await runSync({ adapter: withConfig.adapter, api: withConfig.api, keys, layout: DEFAULT_LAYOUT, includeVaultConfig: false });
     await b.sync();
 
     expect(b.adapter.text(".obsidian/app.json")).toBe("{}");
@@ -149,6 +152,7 @@ describe("each reconciler decision is logged once", () => {
       adapter: b.adapter,
       api: b.api,
       keys,
+      layout: DEFAULT_LAYOUT,
       includeVaultConfig: false,
       onNote: (n) => seen.push(`${n.path}|${n.message}`),
     });
@@ -202,6 +206,7 @@ describe("excluding a folder excludes everything inside it", () => {
       adapter: a.adapter,
       api: a.api,
       keys,
+      layout: DEFAULT_LAYOUT,
       includeVaultConfig: false,
       exclude: ["Work/Private"], // no trailing slash
     });
@@ -224,6 +229,7 @@ describe("excluding a folder excludes everything inside it", () => {
       adapter: a.adapter,
       api: a.api,
       keys,
+      layout: DEFAULT_LAYOUT,
       includeVaultConfig: false,
       exclude: ["Archive"],
     });
@@ -284,11 +290,11 @@ describe("a corrupt state file falls back to the previous one", () => {
       protocol: 1, vaultId: "v", deviceId: "macbook", lastSeq: 9,
       files: { "a.md": { blobId: "aa", size: 2, mtime: 1 } }, remote: {},
     };
-    await saveState(adapter, good);
+    await saveState(adapter, DEFAULT_LAYOUT, good);
     await adapter.write(`${STATE_PATH}.prev`, JSON.stringify(good));
     await adapter.write(STATE_PATH, "{ truncated");
 
-    const loaded = await loadState(adapter);
+    const loaded = await loadState(adapter, DEFAULT_LAYOUT);
     expect(loaded.state?.lastSeq).toBe(9);
     expect(loaded.problem).toMatch(/recovered/);
   });
@@ -305,12 +311,12 @@ describe("a crash while saving state never leaves no state at all", () => {
       files: { "a.md": { blobId: "aa", size: 2, mtime: 1 } },
       remote: {},
     };
-    await saveState(adapter, state);
+    await saveState(adapter, DEFAULT_LAYOUT, state);
 
     // Simulate a crash between the two renames: main gone, previous present.
     await adapter.rename(STATE_PATH, `${STATE_PATH}.prev`);
 
-    const loaded = await loadState(adapter);
+    const loaded = await loadState(adapter, DEFAULT_LAYOUT);
     expect(loaded.state?.lastSeq).toBe(7);
     expect(loaded.problem).toMatch(/recovered/);
   });
@@ -318,8 +324,8 @@ describe("a crash while saving state never leaves no state at all", () => {
   it("leaves no stray files behind on a normal save", async () => {
     const adapter = new FakeAdapter();
     const state: BaseState = { protocol: 1, vaultId: "v", deviceId: "d", lastSeq: 1, files: {}, remote: {} };
-    await saveState(adapter, state);
-    await saveState(adapter, state);
+    await saveState(adapter, DEFAULT_LAYOUT, state);
+    await saveState(adapter, DEFAULT_LAYOUT, state);
 
     const stray = [...adapter.files.keys()].filter((p) => p.endsWith(".tmp") || p.endsWith(".prev"));
     expect(stray).toEqual([]);
@@ -352,7 +358,7 @@ describe("the blob existence check is retried like every other request", () => {
       },
     });
 
-    const summary = await runSync({ adapter: a.adapter, api, keys, includeVaultConfig: false });
+    const summary = await runSync({ adapter: a.adapter, api, keys, layout: DEFAULT_LAYOUT, includeVaultConfig: false });
     expect(summary.pushed).toBe(1);
     // The failed HEAD was retried, not skipped.
     expect(heads).toBe(2);
@@ -567,5 +573,36 @@ describe("a conflict applies all of its effects or none of them", () => {
     expect(server.journal).toHaveLength(2);
     expect(adapter.text(action.copyPath)).toBe("the other device's version");
     expect(adapter.text("note.md")).toBe("this device's version");
+  });
+});
+
+describe("a vault with a custom config folder keeps the plugin's own state private", () => {
+  const mobile = vaultLayout(".obsidian-mobile");
+
+  it("writes state where the plugin lives and never publishes it", async () => {
+    const { server, keys } = await vault();
+    const a = new FakeAdapter();
+    const b = new FakeAdapter();
+    a.put("note.md", "hello");
+    a.put(".obsidian-mobile/app.json", "{}");
+    a.put(".obsidian-mobile/workspace-mobile.json", "{\"per\":\"device\"}");
+    a.put(".obsidian-mobile/plugins/obsydian-sync/data.json", "{\"secretNamespace\":\"x\"}");
+
+    const sync = (adapter: FakeAdapter, token: string) =>
+      runSync({ adapter, api: fakeApi(server, token), keys, layout: mobile, includeVaultConfig: true });
+
+    await sync(a, "token-a");
+    await sync(a, "token-a");
+
+    // State lands in the plugin's real folder, where the next load will find it.
+    expect(a.files.has(statePath(mobile))).toBe(true);
+    expect(a.files.has(statePath(DEFAULT_LAYOUT))).toBe(false);
+
+    // And another device receives the shareable config but none of the private files.
+    await sync(b, "token-b");
+    expect(b.text("note.md")).toBe("hello");
+    expect(b.text(".obsidian-mobile/app.json")).toBe("{}");
+    expect(b.files.has(".obsidian-mobile/workspace-mobile.json")).toBe(false);
+    expect([...b.files.keys()].filter((p) => p.startsWith(".obsidian-mobile/plugins/obsydian-sync/") && p !== statePath(mobile))).toEqual([]);
   });
 });

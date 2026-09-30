@@ -10,6 +10,7 @@
 
 import { SyncApi } from "../src/api.ts";
 import { deriveKeys, deriveMasterKey } from "../src/crypto.ts";
+import { DEFAULT_LAYOUT } from "../src/layout.ts";
 import { runSync } from "../src/sync.ts";
 import { NodeAdapter, nodeTransport } from "../test/node-adapter.ts";
 
@@ -28,6 +29,7 @@ const s = await runSync({
   api,
   keys,
   meta,
+  layout: DEFAULT_LAYOUT,
   includeVaultConfig: true,
   onNote: (n) => console.log(`  [${n.level}] ${n.path || "-"}: ${n.message}`),
 });

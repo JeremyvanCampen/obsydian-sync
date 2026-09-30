@@ -5,7 +5,7 @@
  * depend on, and it lets every module that touches files be tested against an
  * in-memory fake rather than a running Obsidian.
  *
- * The adapter is used rather than the `Vault` API because `.obsidian/` is not
+ * The adapter is used rather than the `Vault` API because the config folder is not
  * visible through `Vault`, and vault settings are in scope for v1.
  */
 export interface VaultAdapter {

@@ -361,8 +361,14 @@ Three invariants that the implementation must not quietly break:
    from the scan, which is otherwise indistinguishable from a local deletion.
    A client **MUST** know which paths it excludes and drop them from base
    without journalling anything — otherwise adding a folder to the exclude
-   list, or stopping syncing `.obsidian`, would write a tombstone per path and
+   list, or stopping syncing the config folder, would write a tombstone per path and
    delete those files on every other device.
+
+   The config folder and the plugin's own folder are whatever *this device*
+   uses — `.obsidian` by default, but Obsidian lets it be overridden, often
+   per device. A client **MUST** take both from the platform rather than assume
+   them: a client that assumed `.obsidian` on a vault using another folder would
+   exclude nothing of its own and publish its base state to every device.
 
 ### 6.1 Untracked paths
 

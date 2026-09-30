@@ -15,6 +15,7 @@ import { type VaultKeys, verifyKdfCheck } from "./crypto.ts";
 import { replay } from "./journal.ts";
 import { type Note, type Plan, reconcile } from "./reconcile.ts";
 import { scanVault, syncScope } from "./scan.ts";
+import type { VaultLayout } from "./layout.ts";
 import { emptyState, loadState, saveState } from "./state.ts";
 import type { BaseIndex, BaseState, RemoteIndex, VaultMeta } from "./types.ts";
 
@@ -22,6 +23,8 @@ export interface SyncOptions {
   adapter: VaultAdapter;
   api: SyncApi;
   keys: VaultKeys;
+  /** Required, not defaulted: see layout.ts. */
+  layout: VaultLayout;
   includeVaultConfig: boolean;
   exclude?: readonly string[];
   /**
@@ -69,7 +72,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
     );
   }
 
-  const loaded = await loadState(adapter);
+  const loaded = await loadState(adapter, opts.layout);
   if (loaded.problem) {
     opts.onNote?.({ level: "warn", path: "", message: loaded.problem });
   }
@@ -141,7 +144,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
     // Persist the pulled journal position anyway: the pull really happened, and
     // re-downloading it on every attempt helps nobody. Base is untouched, so
     // nothing has been decided.
-    await saveState(adapter, {
+    await saveState(adapter, opts.layout, {
       ...state,
       lastSeq: replayed.lastSeq,
       remote: Object.fromEntries(replayed.index),
@@ -182,7 +185,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
     lastSeq: replayed.lastSeq,
     remote: Object.fromEntries(replayed.index),
   };
-  await saveState(adapter, next);
+  await saveState(adapter, opts.layout, next);
 
   return {
     pushed: applied.pushed,

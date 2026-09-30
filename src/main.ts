@@ -14,6 +14,7 @@ import type { Note } from "./reconcile.ts";
 import { type SyncReason, SyncScheduler } from "./scheduler.ts";
 import { DEFAULT_SETTINGS, type ObsydianSyncSettings, ObsydianSyncSettingTab } from "./settings.ts";
 import { Credentials, type SecretName, isValidNamespace, migrateLegacySecrets } from "./secrets.ts";
+import { type VaultLayout, vaultLayout } from "./layout.ts";
 import { type SyncScope, syncScope } from "./scan.ts";
 import { SyncError, type SyncSummary, runSync } from "./sync.ts";
 import type { VaultMeta } from "./types.ts";
@@ -32,8 +33,13 @@ export default class ObsydianSyncPlugin extends Plugin {
   private scheduler: SyncScheduler | null = null;
   /** Set for the next scheduled run only; see the confirm-deletions command. */
   private confirmNextRun = false;
+  /**
+   * The vault's real config folder and this plugin's real folder, read from
+   * Obsidian rather than assumed. See layout.ts.
+   */
+  private layout!: VaultLayout;
   /** Rebuilt whenever settings change; see syncScope. */
-  private scope: SyncScope = syncScope(DEFAULT_SETTINGS);
+  private scope!: SyncScope;
   /** Set by loadSettings, before anything reads a credential. */
   private credentials!: Credentials;
   private statusBar: HTMLElement | null = null;
@@ -48,6 +54,7 @@ export default class ObsydianSyncPlugin extends Plugin {
   private lastSummary: SyncSummary | null = null;
 
   override async onload(): Promise<void> {
+    this.layout = vaultLayout(this.app.vault.configDir, this.manifest.dir);
     await this.loadSettings();
 
     this.statusBar = this.addStatusBarItem();
@@ -147,7 +154,7 @@ export default class ObsydianSyncPlugin extends Plugin {
     }
 
     this.settings = { ...DEFAULT_SETTINGS, ...(result.data as Partial<ObsydianSyncSettings>) };
-    this.scope = syncScope(this.settings);
+    this.scope = syncScope({ ...this.settings, layout: this.layout });
   }
 
   getSecret(name: SecretName): string {
@@ -170,7 +177,7 @@ export default class ObsydianSyncPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
-    this.scope = syncScope(this.settings);
+    this.scope = syncScope({ ...this.settings, layout: this.layout });
     this.scheduler?.updateConfig(this.schedulerConfig());
   }
 
@@ -261,6 +268,7 @@ export default class ObsydianSyncPlugin extends Plugin {
         api,
         meta,
         keys: await this.keysFor(meta),
+        layout: this.layout,
         includeVaultConfig: this.settings.includeVaultConfig,
         exclude: this.settings.exclude,
         confirmMassDeletion: opts.confirmMassDeletion,

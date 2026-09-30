@@ -15,6 +15,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SyncApi } from "../src/api.ts";
 import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
+import { DEFAULT_LAYOUT } from "../src/layout.ts";
 import { runSync } from "../src/sync.ts";
 import { NodeAdapter, nodeTransport } from "./node-adapter.ts";
 import { type RunningServer, startServer } from "./server-harness.ts";
@@ -92,7 +93,7 @@ beforeAll(async () => {
   keys = await deriveKeys(await deriveMasterKey(PASSPHRASE, meta.kdf));
   await api.initMeta(await makeKdfCheck(keys, meta.vaultId));
 
-  await runSync({ adapter: new NodeAdapter(vault), api, keys, includeVaultConfig: false });
+  await runSync({ adapter: new NodeAdapter(vault), api, keys, layout: DEFAULT_LAYOUT, includeVaultConfig: false });
 }, 60_000);
 
 afterAll(async () => {

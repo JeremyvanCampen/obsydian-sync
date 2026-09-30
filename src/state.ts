@@ -11,11 +11,11 @@
  */
 
 import type { VaultAdapter } from "./adapter.ts";
+import { type VaultLayout, statePath } from "./layout.ts";
 import type { BaseFile, BaseState, RemoteEntry } from "./types.ts";
 import { PROTOCOL_VERSION } from "./types.ts";
 
-export const PLUGIN_DIR = ".obsidian/plugins/obsydian-sync";
-export const STATE_PATH = `${PLUGIN_DIR}/state.json`;
+// Paths come from the layout: see layout.ts for why they cannot be constants.
 
 export function emptyState(vaultId: string, deviceId: string): BaseState {
   return { protocol: PROTOCOL_VERSION, vaultId, deviceId, lastSeq: 0, files: {}, remote: {} };
@@ -34,7 +34,10 @@ export function emptyState(vaultId: string, deviceId: string): BaseState {
  */
 export async function loadState(
   adapter: VaultAdapter,
+  layout: VaultLayout,
 ): Promise<{ state: BaseState | null; problem?: string }> {
+  const STATE_PATH = statePath(layout);
+  const PREVIOUS_PATH = `${STATE_PATH}.prev`;
   // Try the current file, then the one saveState renames aside. The fallback
   // covers a file that is *unusable*, not merely absent: a crash or a truncated
   // write can leave a corrupt STATE_PATH sitting next to a perfectly good
@@ -117,8 +120,6 @@ function validate(value: unknown): string | undefined {
   return undefined;
 }
 
-const TMP_PATH = `${STATE_PATH}.tmp`;
-const PREVIOUS_PATH = `${STATE_PATH}.prev`;
 
 /**
  * Writes the state so that *some* valid state file exists at every instant.
@@ -129,8 +130,15 @@ const PREVIOUS_PATH = `${STATE_PATH}.prev`;
  * every path untracked and trips the mass-deletion guard. So the old file is
  * renamed aside rather than removed, and `loadState` recovers from it.
  */
-export async function saveState(adapter: VaultAdapter, state: BaseState): Promise<void> {
-  await ensureDir(adapter, PLUGIN_DIR);
+export async function saveState(
+  adapter: VaultAdapter,
+  layout: VaultLayout,
+  state: BaseState,
+): Promise<void> {
+  const STATE_PATH = statePath(layout);
+  const TMP_PATH = `${STATE_PATH}.tmp`;
+  const PREVIOUS_PATH = `${STATE_PATH}.prev`;
+  await ensureDir(adapter, layout.pluginDir);
   await adapter.write(TMP_PATH, JSON.stringify(state));
 
   if (await adapter.exists(STATE_PATH)) {

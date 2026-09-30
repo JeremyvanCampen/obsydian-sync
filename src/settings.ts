@@ -140,7 +140,7 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
 
     this.toggle(
       containerEl,
-      "Vault settings (.obsidian)",
+      `Vault settings (${this.app.vault.configDir})`,
       "Appearance, hotkeys and plugin config. Per-device state (window layout, this " +
         "plugin's own folder) is always excluded.",
       "includeVaultConfig",

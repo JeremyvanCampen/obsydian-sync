@@ -97,7 +97,7 @@ export interface ReconcileInput {
    *
    * This must be asked, not inferred. An excluded path is simply absent from
    * the scan, which is indistinguishable from a local deletion — so adding a
-   * folder to the exclude list, or turning off `.obsidian` syncing, would
+   * folder to the exclude list, or turning off config-folder syncing, would
    * otherwise push a tombstone per path and move those files to trash on every
    * other device.
    */
