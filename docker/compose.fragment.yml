@@ -17,6 +17,9 @@
     # Built and tagged on the server first (see SETUP.md §3):
     #   cd ~/obsydian-sync && docker build -f docker/Dockerfile -t obsydian-sync:latest .
     image: obsydian-sync:latest
+    # Built locally, never pulled. Without this, the routine `docker compose
+    # pull` prints "pull access denied" for this service on every run.
+    pull_policy: never
     # To build from compose instead, the context is the repo root and the
     # Dockerfile is not at that root, so both have to be named:
     # build:

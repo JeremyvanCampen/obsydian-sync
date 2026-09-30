@@ -5,6 +5,7 @@ import { obsidianTransport } from "./obsidian-transport.ts";
 import type { Note } from "./reconcile.ts";
 import { type SyncReason, SyncScheduler } from "./scheduler.ts";
 import { DEFAULT_SETTINGS, type ObsydianSyncSettings, ObsydianSyncSettingTab } from "./settings.ts";
+import { type SecretName, migrateLegacySecrets, readSecret, writeSecret } from "./secrets.ts";
 import { PLUGIN_DIR } from "./state.ts";
 import { SyncError, type SyncSummary, runSync } from "./sync.ts";
 
@@ -112,7 +113,28 @@ export default class ObsydianSyncPlugin extends Plugin {
   // --- configuration ------------------------------------------------------
 
   async loadSettings(): Promise<void> {
-    this.settings = { ...DEFAULT_SETTINGS, ...((await this.loadData()) as Partial<ObsydianSyncSettings>) };
+    const saved = ((await this.loadData()) ?? {}) as Record<string, unknown>;
+
+    // Earlier versions kept the token and passphrase in data.json. Move them to
+    // secure storage, and rewrite data.json only if something actually moved.
+    const { data, migrated, failed } = migrateLegacySecrets(this.app.secretStorage, saved);
+    for (const f of failed) {
+      console.error(`[obsydian-sync] could not move the ${f.name} to secure storage:`, f.error);
+    }
+    if (migrated.length > 0) await this.saveData(data);
+
+    this.settings = { ...DEFAULT_SETTINGS, ...(data as Partial<ObsydianSyncSettings>) };
+  }
+
+  getSecret(name: SecretName): string {
+    return readSecret(this.app.secretStorage, name);
+  }
+
+  setSecret(name: SecretName, value: string): void {
+    writeSecret(this.app.secretStorage, name, value);
+    // A changed credential invalidates the derived keys; the cache key would
+    // catch it too, but there is no reason to hold stale keys until then.
+    if (name === "passphrase") this.keys = null;
   }
 
   async saveSettings(): Promise<void> {
@@ -128,7 +150,7 @@ export default class ObsydianSyncPlugin extends Plugin {
   }
 
   private isConfigured(): boolean {
-    return Boolean(this.settings.serverUrl && this.settings.token && this.settings.passphrase);
+    return Boolean(this.settings.serverUrl && this.getSecret("token") && this.getSecret("passphrase"));
   }
 
   // --- triggers -----------------------------------------------------------
@@ -173,12 +195,13 @@ export default class ObsydianSyncPlugin extends Plugin {
     const api = this.buildApi();
     const meta = await api.meta();
 
-    const cacheKey = `${this.settings.serverUrl}\u0000${meta.vaultId}\u0000${this.settings.passphrase}`;
+    const passphrase = this.getSecret("passphrase");
+    const cacheKey = `${this.settings.serverUrl}\u0000${meta.vaultId}\u0000${passphrase}`;
     if (this.keys && this.keysFor === cacheKey) return this.keys;
 
     // Key derivation is deliberately expensive, so it is done once per
     // (server, vault, passphrase) rather than once per sync.
-    const master = await deriveMasterKey(this.settings.passphrase, meta.kdf);
+    const master = await deriveMasterKey(passphrase, meta.kdf);
     this.keys = await deriveKeys(master);
     this.keysFor = cacheKey;
     return this.keys;
@@ -187,7 +210,7 @@ export default class ObsydianSyncPlugin extends Plugin {
   private buildApi(): SyncApi {
     return new SyncApi({
       baseUrl: this.settings.serverUrl,
-      token: this.settings.token,
+      token: this.getSecret("token"),
       transport: obsidianTransport(),
     });
   }
@@ -277,7 +300,7 @@ export default class ObsydianSyncPlugin extends Plugin {
         return;
       }
 
-      const keys = await deriveKeys(await deriveMasterKey(this.settings.passphrase, meta.kdf));
+      const keys = await deriveKeys(await deriveMasterKey(this.getSecret("passphrase"), meta.kdf));
       const ok = await verifyKdfCheck(keys, meta.vaultId, meta.kdfCheck);
 
       new Notice(
@@ -292,7 +315,8 @@ export default class ObsydianSyncPlugin extends Plugin {
   }
 
   async initializeVault(): Promise<void> {
-    if (!this.settings.passphrase) {
+    const passphrase = this.getSecret("passphrase");
+    if (!passphrase) {
       new Notice("Set a passphrase first.");
       return;
     }
@@ -323,7 +347,7 @@ export default class ObsydianSyncPlugin extends Plugin {
         return;
       }
 
-      const keys = await deriveKeys(await deriveMasterKey(this.settings.passphrase, meta.kdf));
+      const keys = await deriveKeys(await deriveMasterKey(passphrase, meta.kdf));
       await api.initMeta(await makeKdfCheck(keys, meta.vaultId));
 
       // Drop any cached keys so the next sync re-derives against the new meta.
@@ -398,7 +422,8 @@ export default class ObsydianSyncPlugin extends Plugin {
       return `${time} ${l.level === "info" ? "" : `[${l.level}] `}${l.message}`;
     });
     new Notice(recent.join("\n"), 20000);
-    console.log("[obsydian-sync] full log:", this.log);
+    // debug, not log: hidden at the console's default level, per the plugin guidelines.
+    console.debug("[obsydian-sync] full log:", this.log);
   }
 }
 

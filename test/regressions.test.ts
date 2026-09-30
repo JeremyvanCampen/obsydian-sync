@@ -403,3 +403,21 @@ describe("7: a file edited mid-sync could be trashed", () => {
     expect(notes.some((m) => m.includes("edited during sync"))).toBe(true);
   });
 });
+
+describe("user-typed exclusion patterns are normalized like scanned paths", () => {
+  it("matches regardless of leading slash, backslashes, or Unicode form", async () => {
+    const { normalizeExcludePattern, isExcludedPath } = await import("../src/scan.ts");
+    const scanned = "Work/Café/notes.md".normalize("NFC");
+
+    for (const typed of ["/Work/", "Work\\\\", "  Work/  ", "Work//", "Work/Café/".normalize("NFD")]) {
+      const pattern = normalizeExcludePattern(typed);
+      expect(isExcludedPath(scanned, [pattern]), `pattern typed as ${JSON.stringify(typed)}`).toBe(true);
+    }
+  });
+
+  it("keeps the trailing slash that means 'this folder'", async () => {
+    const { normalizeExcludePattern } = await import("../src/scan.ts");
+    expect(normalizeExcludePattern("/Archive/")).toBe("Archive/");
+    expect(normalizeExcludePattern("*.tmp")).toBe("*.tmp");
+  });
+});

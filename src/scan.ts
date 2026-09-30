@@ -191,3 +191,16 @@ export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
 export function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\/+/, "").normalize("NFC");
 }
+
+/**
+ * The same canonical form for a user-typed exclusion pattern, so it compares
+ * against scanned paths at all. `/Work/`, `Work\Private` and a decomposed
+ * `Café/` typed on macOS would otherwise never match anything.
+ *
+ * Obsidian's own normalizePath is not used here: it strips a trailing slash,
+ * and a trailing slash is what makes a pattern mean "this folder and
+ * everything under it".
+ */
+export function normalizeExcludePattern(pattern: string): string {
+  return normalizePath(pattern.trim()).replace(/\/{2,}/g, "/");
+}

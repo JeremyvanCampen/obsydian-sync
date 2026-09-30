@@ -1,20 +1,12 @@
 import { type App, PluginSettingTab, Setting } from "obsidian";
 import type ObsydianSyncPlugin from "./main.ts";
+import { normalizeExcludePattern } from "./scan.ts";
 
 export interface ObsydianSyncSettings {
   /** e.g. http://100.x.y.z:8787 — the tailnet address, not a public host. */
   serverUrl: string;
-  /** This device's bearer token. */
-  token: string;
-  /**
-   * Cached so the vault syncs without a prompt every time.
-   *
-   * It lives in this plugin's own data.json, which is excluded from sync — so
-   * it never travels, and never reaches the server or the GitLab mirror. Anyone
-   * with filesystem access to the device can read it; that is the same threat
-   * as having the vault itself, which is already in plaintext on disk.
-   */
-  passphrase: string;
+  // The bearer token and the passphrase are deliberately absent: they live in
+  // SecretStorage, never in data.json. See secrets.ts.
   includeVaultConfig: boolean;
   exclude: string[];
   syncOnStartup: boolean;
@@ -26,8 +18,6 @@ export interface ObsydianSyncSettings {
 
 export const DEFAULT_SETTINGS: ObsydianSyncSettings = {
   serverUrl: "",
-  token: "",
-  passphrase: "",
   includeVaultConfig: true,
   exclude: [],
   syncOnStartup: true,
@@ -49,8 +39,6 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Connection").setHeading();
-
     new Setting(containerEl)
       .setName("Server URL")
       .setDesc("The sync server, e.g. http://100.x.y.z:8787. Reachable over Tailscale only.")
@@ -66,31 +54,27 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Device token")
-      .setDesc("This device's bearer token, from the server's config.")
+      .setDesc("This device's bearer token, from the server's config. Kept in secure storage.")
       .addText((text) => {
         text.inputEl.type = "password";
         text
-          .setValue(this.plugin.settings.token)
-          .onChange(async (value) => {
-            this.plugin.settings.token = value.trim();
-            await this.plugin.saveSettings();
-          });
+          .setValue(this.plugin.getSecret("token"))
+          .onChange((value) => this.plugin.setSecret("token", value.trim()));
       });
 
     new Setting(containerEl)
       .setName("Passphrase")
       .setDesc(
         "Encrypts everything before it leaves this device. It must be identical on every " +
-          "device, and it cannot be recovered or changed — losing it loses the vault.",
+          "device, and it cannot be recovered or changed — losing it loses the vault. " +
+          "Kept in secure storage.",
       )
       .addText((text) => {
         text.inputEl.type = "password";
         text
-          .setValue(this.plugin.settings.passphrase)
-          .onChange(async (value) => {
-            this.plugin.settings.passphrase = value;
-            await this.plugin.saveSettings();
-          });
+          .setValue(this.plugin.getSecret("passphrase"))
+          // Not trimmed: the passphrase is used exactly as typed.
+          .onChange((value) => this.plugin.setSecret("passphrase", value));
       });
 
     new Setting(containerEl)
@@ -184,7 +168,7 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.exclude = value
               .split("\n")
-              .map((s) => s.trim())
+              .map(normalizeExcludePattern)
               .filter((s) => s.length > 0);
             await this.plugin.saveSettings();
           }),

@@ -54,6 +54,8 @@ Full details: [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md).
 The plugin is not in the community store. Install it with
 [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
+Requires Obsidian **1.11.4** or later, for secure credential storage.
+
 1. Install **BRAT** from Community plugins.
 2. Command palette → *BRAT: Add a beta plugin for testing*
 3. Paste `JeremyvanCampen/obsydian-sync`
@@ -110,6 +112,10 @@ implementations agree on *encryption*; the HTTP tests prove they agree on the
 rests on — with everything encrypted, do the files actually come back?
 
 ## Security
+
+The passphrase and device token are kept in Obsidian's secure storage (the OS
+keychain on desktop), not in the plugin's `data.json` — which lives inside the
+vault, where another sync tool could carry it off.
 
 Content is sealed with AES-256-GCM before it leaves the device. Keys come from
 your passphrase via PBKDF2-HMAC-SHA256, with separate subkeys per purpose
