@@ -27,7 +27,7 @@ const TAG_BYTES = 16;
 /** blobId is a 128-bit HMAC in lowercase hex. */
 const BLOB_ID_BYTES = 16;
 
-const INFO = {
+export const SUBKEY_INFO = {
   content: "obsydian-sync/v1/content",
   meta: "obsydian-sync/v1/meta",
   id: "obsydian-sync/v1/id",
@@ -35,7 +35,7 @@ const INFO = {
 } as const;
 
 /** The literal sealed by `kdfCheck`, used to verify a passphrase. */
-const KDF_CHECK_PLAINTEXT = "obsydian-sync-kdf-check";
+export const KDF_CHECK_LITERAL = "obsydian-sync-kdf-check";
 
 /** HKDF salt: 32 zero bytes, matching the spec and Rust's `Hkdf::new(None)`. */
 const HKDF_SALT: Bytes = new Uint8Array(32);
@@ -51,8 +51,13 @@ export interface VaultKeys {
 // --- encoding helpers -----------------------------------------------------
 
 const encoder = new TextEncoder();
-const utf8 = { encode: (s: string): Bytes => encoder.encode(s) as Bytes };
-const utf8Decode = new TextDecoder();
+export const utf8 = { encode: (s: string): Bytes => encoder.encode(s) as Bytes };
+export const utf8Decode = new TextDecoder();
+
+/** `n` random bytes as lowercase hex — the form every id in the protocol takes. */
+export function randomHex(bytes: number): string {
+  return toHex(globalThis.crypto.getRandomValues(new Uint8Array(bytes)) as Bytes);
+}
 
 export function toBase64(bytes: Bytes): string {
   let binary = "";
@@ -72,6 +77,30 @@ export function toHex(bytes: Bytes): string {
 }
 
 // --- key derivation -------------------------------------------------------
+
+/**
+ * Floors for KDF parameters accepted when *initializing* a vault — the one
+ * moment the server-supplied parameters are not yet pinned by a kdfCheck. A
+ * server offering a trivial iteration count or an empty salt then would weaken
+ * every key the vault ever uses, permanently. See PROTOCOL.md §3.1.
+ */
+export const MIN_KDF_ITERATIONS = 100_000;
+export const MIN_KDF_SALT_BYTES = 16;
+
+/** Why these parameters are unacceptable, or null if they are fine. */
+export function kdfProblem(kdf: KdfParams): string | null {
+  if (kdf.alg !== "PBKDF2-HMAC-SHA256") return `unsupported KDF ${kdf.alg}`;
+  const saltBytes = kdf.salt ? fromBase64(kdf.salt).length : 0;
+  // Both parameters matter: an empty salt defeats per-vault salting entirely,
+  // so checking only the iteration count would guard half of what it should.
+  if (kdf.iterations < MIN_KDF_ITERATIONS || saltBytes < MIN_KDF_SALT_BYTES) {
+    return (
+      `the server offers ${kdf.iterations} KDF iterations and a ${saltBytes}-byte salt ` +
+      `(expected at least ${MIN_KDF_ITERATIONS} and ${MIN_KDF_SALT_BYTES})`
+    );
+  }
+  return null;
+}
 
 /**
  * PBKDF2 over the passphrase. The passphrase is NFC-normalized first: the same
@@ -105,17 +134,6 @@ export async function deriveMasterKey(
   return new Uint8Array(bits) as Bytes;
 }
 
-async function hkdf(master: Bytes, info: string, usages: KeyUsage[], algorithm: "AES-GCM" | "HMAC"): Promise<CryptoKey> {
-  const material = await SUBTLE.importKey("raw", master, "HKDF", false, ["deriveBits"]);
-  const bits = await SUBTLE.deriveBits(
-    { name: "HKDF", hash: "SHA-256", salt: HKDF_SALT, info: utf8.encode(info) },
-    material,
-    256,
-  );
-  const params = algorithm === "HMAC" ? { name: "HMAC", hash: "SHA-256" } : { name: "AES-GCM" };
-  return SUBTLE.importKey("raw", bits, params, false, usages);
-}
-
 /** Raw subkey bytes. Exposed for the test vectors; normal code uses `deriveKeys`. */
 export async function deriveSubkeyBytes(master: Bytes, info: string): Promise<Bytes> {
   const material = await SUBTLE.importKey("raw", master, "HKDF", false, ["deriveBits"]);
@@ -127,7 +145,19 @@ export async function deriveSubkeyBytes(master: Bytes, info: string): Promise<By
   return new Uint8Array(bits) as Bytes;
 }
 
-export const SUBKEY_INFO = INFO;
+/**
+ * Imports a subkey for use. Goes through `deriveSubkeyBytes` — the function the
+ * subkey vectors pin — so production keys cannot drift from the tested path.
+ */
+async function hkdf(
+  master: Bytes,
+  info: string,
+  usages: KeyUsage[],
+  algorithm: "AES-GCM" | "HMAC",
+): Promise<CryptoKey> {
+  const params = algorithm === "HMAC" ? { name: "HMAC", hash: "SHA-256" } : { name: "AES-GCM" };
+  return SUBTLE.importKey("raw", await deriveSubkeyBytes(master, info), params, false, usages);
+}
 
 /**
  * One key per purpose. A key is never reused across two of these — separation
@@ -135,10 +165,10 @@ export const SUBKEY_INFO = INFO;
  */
 export async function deriveKeys(master: Bytes): Promise<VaultKeys> {
   const [content, meta, id, check] = await Promise.all([
-    hkdf(master, INFO.content, ["encrypt", "decrypt"], "AES-GCM"),
-    hkdf(master, INFO.meta, ["encrypt", "decrypt"], "AES-GCM"),
-    hkdf(master, INFO.id, ["sign"], "HMAC"),
-    hkdf(master, INFO.check, ["encrypt", "decrypt"], "AES-GCM"),
+    hkdf(master, SUBKEY_INFO.content, ["encrypt", "decrypt"], "AES-GCM"),
+    hkdf(master, SUBKEY_INFO.meta, ["encrypt", "decrypt"], "AES-GCM"),
+    hkdf(master, SUBKEY_INFO.id, ["sign"], "HMAC"),
+    hkdf(master, SUBKEY_INFO.check, ["encrypt", "decrypt"], "AES-GCM"),
   ]);
   return { content, meta, id, check };
 }
@@ -231,7 +261,7 @@ export async function blobIdFor(keys: VaultKeys, plaintext: Bytes): Promise<stri
 // --- passphrase verification ---------------------------------------------
 
 export async function makeKdfCheck(keys: VaultKeys, vaultId: string): Promise<string> {
-  const sealed = await seal(keys.check, utf8.encode(KDF_CHECK_PLAINTEXT), aadForKdfCheck(vaultId));
+  const sealed = await seal(keys.check, utf8.encode(KDF_CHECK_LITERAL), aadForKdfCheck(vaultId));
   return toBase64(sealed);
 }
 
@@ -246,7 +276,7 @@ export async function verifyKdfCheck(
 ): Promise<boolean> {
   try {
     const plain = await unseal(keys.check, fromBase64(kdfCheckB64), aadForKdfCheck(vaultId));
-    return utf8Decode.decode(plain) === KDF_CHECK_PLAINTEXT;
+    return utf8Decode.decode(plain) === KDF_CHECK_LITERAL;
   } catch {
     // A wrong passphrase fails the AEAD tag; that is the expected path here,
     // not an error worth propagating.
@@ -254,4 +284,3 @@ export async function verifyKdfCheck(
   }
 }
 
-export const KDF_CHECK_LITERAL = KDF_CHECK_PLAINTEXT;

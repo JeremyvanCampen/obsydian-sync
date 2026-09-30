@@ -14,9 +14,9 @@ import { applyPlan } from "./apply.ts";
 import { type VaultKeys, verifyKdfCheck } from "./crypto.ts";
 import { replay } from "./journal.ts";
 import { type Note, type Plan, reconcile } from "./reconcile.ts";
-import { ALWAYS_EXCLUDED, isExcludedPath, scanVault } from "./scan.ts";
-import { emptyState, fromIndex, loadState, saveState, toIndex, toRemoteIndex } from "./state.ts";
-import type { BaseState, RemoteIndex } from "./types.ts";
+import { scanVault, syncScope } from "./scan.ts";
+import { emptyState, loadState, saveState } from "./state.ts";
+import type { BaseIndex, BaseState, RemoteIndex, VaultMeta } from "./types.ts";
 
 export interface SyncOptions {
   adapter: VaultAdapter;
@@ -29,7 +29,11 @@ export interface SyncOptions {
    * after the user has been shown what would happen and agreed.
    */
   confirmMassDeletion?: boolean;
-  now?: () => Date;
+  /**
+   * Meta the caller already fetched, to derive keys. Passing it saves a round
+   * trip on every sync — the caller needs meta before it can have keys at all.
+   */
+  meta?: VaultMeta;
   onNote?: (note: Note) => void;
 }
 
@@ -50,9 +54,7 @@ export class SyncError extends Error {}
 
 export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
   const { adapter, api, keys } = opts;
-  const now = opts.now ?? (() => new Date());
-
-  const meta = await api.meta();
+  const meta = opts.meta ?? (await api.meta());
 
   if (meta.kdfCheck === null) {
     throw new SyncError(
@@ -88,7 +90,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
 
   // --- pull ---------------------------------------------------------------
 
-  let remote: RemoteIndex = toRemoteIndex(state);
+  let remote: RemoteIndex = new Map(Object.entries(state.remote));
   let fromSeq = state.lastSeq;
 
   if (remote.size === 0 && state.lastSeq > 0) {
@@ -99,42 +101,38 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
       path: "",
       message: "cached remote index is missing; replaying the journal from the start",
     });
-    remote = new Map();
     fromSeq = 0;
   }
 
-  const entries = await api.journalAll(fromSeq);
+  // meta.head says where the journal ends. Already there means the pull is
+  // guaranteed empty — skip the round trip, which is most syncs: focus and
+  // interval triggers usually find nothing new.
+  const entries = fromSeq >= meta.head ? [] : await api.journalAll(fromSeq);
   const replayed = await replay(entries, keys, remote, fromSeq);
 
   // --- scan ---------------------------------------------------------------
 
-  const base = toIndex(state);
+  const base: BaseIndex = new Map(Object.entries(state.files));
+  const scope = syncScope(opts);
   const scan = await scanVault({
     adapter,
     keys,
     base,
-    exclude: opts.exclude,
-    includeVaultConfig: opts.includeVaultConfig,
+    scope,
     onProblem: (path, error) =>
       opts.onNote?.({ level: "warn", path, message: `could not read: ${String(error)}` }),
   });
 
   // --- reconcile ----------------------------------------------------------
 
-  // The same patterns the scan applied, so reconcile can tell "excluded" from
-  // "deleted" rather than treating a settings change as a mass deletion.
-  const patterns = [...ALWAYS_EXCLUDED, ...(opts.exclude ?? [])];
-  const excludedPath = (path: string): boolean =>
-    isExcludedPath(path, patterns) ||
-    (!opts.includeVaultConfig && (path === ".obsidian" || path.startsWith(".obsidian/")));
-
   const plan: Plan = reconcile({
     base,
     local: scan.local,
     remote: replayed.index,
-    deviceId: state.deviceId,
-    now: now(),
-    isExcluded: excludedPath,
+    now: new Date(),
+    // The same scope the scan used, so reconcile can tell "excluded" from
+    // "deleted" rather than reading a settings change as a mass deletion.
+    isExcluded: (path) => !scope.includes(path),
   });
 
   for (const note of plan.notes) opts.onNote?.(note);
@@ -179,7 +177,8 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
   // the same path as any other device's writes — one code path instead of two,
   // at the cost of re-reading our own entries once.
   const next: BaseState = {
-    ...fromIndex(state, applied.base),
+    ...state,
+    files: Object.fromEntries(base),
     lastSeq: replayed.lastSeq,
     remote: Object.fromEntries(replayed.index),
   };

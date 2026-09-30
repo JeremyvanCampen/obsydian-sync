@@ -25,21 +25,24 @@ mod fixture {
         pub dir: tempfile::TempDir,
     }
 
+    /// The fixture's KDF parameters, named once: `keys()` and `build()` must
+    /// agree, or a test forging a blob seals it under keys that do not open the
+    /// store and fails for the wrong reason.
+    const SALT: [u8; 32] = [7u8; 32];
+    const ITERATIONS: u32 = 1000;
+
     /// The same keys the fixture sealed with, for tests that need to forge a blob.
     pub fn keys() -> VaultKeys {
-        derive_keys(&derive_master_key(PASSPHRASE, &[7u8; 32], 1000))
+        derive_keys(&derive_master_key(PASSPHRASE, &SALT, ITERATIONS))
     }
 
     pub fn build(files: &[(&str, &[u8])], deletions: &[&str]) -> Built {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
 
-        let salt = [7u8; 32];
-        let iterations = 1000u32;
+        let (salt, iterations) = (SALT, ITERATIONS);
         let vault_id = "1600203ea33bc4d1be6641c1546be18b";
-
-        let master = derive_master_key(PASSPHRASE, &salt, iterations);
-        let keys = derive_keys(&master);
+        let keys = keys();
 
         let check = seal_with_iv(
             &keys.check,
@@ -90,9 +93,10 @@ mod fixture {
             let id = blob_id(&keys, content);
             let sealed = seal_with_iv(&keys.content, content, &aad_for_blob(&id), &[9u8; 12]).unwrap();
 
-            let blob_dir = root.join("blobs").join(&id[0..2]).join(&id[2..4]);
-            std::fs::create_dir_all(&blob_dir).unwrap();
-            std::fs::write(blob_dir.join(&id), &sealed).unwrap();
+            // Through the CLI's own layout helper, so the fixture cannot drift.
+            let blob_file = obsydian_restore::store::blob_path(root, &id).unwrap();
+            std::fs::create_dir_all(blob_file.parent().unwrap()).unwrap();
+            std::fs::write(&blob_file, &sealed).unwrap();
 
             append(
                 &mut journal,
@@ -304,13 +308,7 @@ fn verify_fails_when_a_blob_decrypts_to_the_wrong_size() {
         &[3u8; 12],
     )
     .unwrap();
-    let blob_path = built
-        .dir
-        .path()
-        .join("blobs")
-        .join(&id[0..2])
-        .join(&id[2..4])
-        .join(&id);
+    let blob_path = obsydian_restore::store::blob_path(built.dir.path(), &id).unwrap();
     std::fs::write(&blob_path, forged).unwrap();
 
     let (ok, stdout, _) = run(built.dir.path(), &["verify"], Some(PASSPHRASE));

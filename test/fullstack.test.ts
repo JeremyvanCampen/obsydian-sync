@@ -13,10 +13,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SyncApi, type Transport } from "../src/api.ts";
+import { SyncApi } from "../src/api.ts";
 import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
 import { runSync } from "../src/sync.ts";
-import { NodeAdapter } from "./node-adapter.ts";
+import { NodeAdapter, nodeTransport } from "./node-adapter.ts";
 import { type RunningServer, startServer } from "./server-harness.ts";
 
 const SERVER = fileURLToPath(new URL("../target/debug/obsydian-sync-server", import.meta.url));
@@ -24,22 +24,26 @@ const RESTORE = fileURLToPath(new URL("../target/debug/obsydian-restore", import
 const TOKEN = "fullstack-token";
 const PASSPHRASE = "a real passphrase with ünïcode";
 
+// A vault exercising the things that actually break: nesting, non-ASCII
+// names, an empty file, binary content, and a file with no extension.
+const FILES: Array<[string, string | Uint8Array]> = [
+  ["Root note.md", "# Root\n\nplain content\n"],
+  ["Work/Meetings/Standup.md", "- ship the thing\n- review PR\n"],
+  ["Home/Groceries.md", "milk\nbread\n"],
+  ["Home/Café niños.md", "unicode in the filename\n"],
+  ["Deeply/nested/three/levels/deep.md", "deep\n"],
+  ["Empty.md", ""],
+  ["LICENSE", "no extension\n"],
+  ["Media/shot.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80, 0x7f])],
+  ["Media/large.bin", new Uint8Array(200 * 1024).map((_, i) => (i * 37) & 0xff)],
+];
+
 let server: RunningServer;
 let root: string;
 let vault: string;
 let store: string;
 let api: SyncApi;
 let keys: VaultKeys;
-
-const transport: Transport = async (req) => {
-  const res = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as BodyInit),
-  });
-  const buf = await res.arrayBuffer();
-  return { status: res.status, text: new TextDecoder().decode(buf), arrayBuffer: buf };
-};
 
 /** Every file under `dir`, as path -> bytes. */
 function snapshot(dir: string, skip: (rel: string) => boolean = () => false): Map<string, Buffer> {
@@ -69,19 +73,7 @@ beforeAll(async () => {
   store = join(root, "store");
   mkdirSync(vault, { recursive: true });
 
-  // A vault exercising the things that actually break: nesting, non-ASCII
-  // names, an empty file, binary content, and a file with no extension.
-  const files: Array<[string, string | Uint8Array]> = [
-    ["Root note.md", "# Root\n\nplain content\n"],
-    ["Work/Meetings/Standup.md", "- ship the thing\n- review PR\n"],
-    ["Home/Groceries.md", "milk\nbread\n"],
-    ["Home/Café niños.md", "unicode in the filename\n"],
-    ["Deeply/nested/three/levels/deep.md", "deep\n"],
-    ["Empty.md", ""],
-    ["LICENSE", "no extension\n"],
-    ["Media/shot.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00, 0x80, 0x7f])],
-    ["Media/large.bin", new Uint8Array(200 * 1024).map((_, i) => (i * 37) & 0xff)],
-  ];
+  const files = FILES;
   for (const [path, content] of files) {
     const abs = join(vault, path);
     mkdirSync(join(abs, ".."), { recursive: true });
@@ -95,7 +87,7 @@ beforeAll(async () => {
     devices: { desktop: TOKEN },
   });
 
-  api = new SyncApi({ baseUrl: server.baseUrl, token: TOKEN, transport, sleep: async () => {} });
+  api = new SyncApi({ baseUrl: server.baseUrl, token: TOKEN, transport: nodeTransport, sleep: async () => {} });
   const meta = await api.meta();
   keys = await deriveKeys(await deriveMasterKey(PASSPHRASE, meta.kdf));
   await api.initMeta(await makeKdfCheck(keys, meta.vaultId));
@@ -141,16 +133,33 @@ describe("a real vault through the real stack", () => {
   }, 30_000);
 
   it("leaks no plaintext to the server", () => {
-    // Literal comparison, not a regex: a '.' in a pattern matches any byte and
-    // will happily "find" .md inside base64, which makes the check meaningless.
-    let everything = "";
-    for (const bytes of snapshot(store).values()) everything += bytes.toString("binary");
+    // Needles are taken from the fixture itself — every path, and the content
+    // of every text file — so the check cannot fall out of step with what the
+    // vault actually holds.
+    //
+    // Two ways this check used to be wrong:
+    //  - Short needles. Sealed data is uniformly random, so any 3-byte string
+    //    such as "png" appears in it by chance roughly one run in ten, and the
+    //    test "found" a leak that was not there. Six bytes makes a chance match
+    //    vanishingly unlikely in the few hundred KB a test store holds.
+    //  - Searching a latin1-decoded string. Paths are stored as UTF-8, so an
+    //    "é" on disk decodes as "Ã©" and a non-ASCII needle could never match
+    //    a real leak. Comparing bytes to bytes has neither problem.
+    const MIN_NEEDLE_BYTES = 6;
+    const store_bytes = Buffer.concat([...snapshot(store).values()]);
 
-    for (const secret of [
-      ".md", "Standup", "Work", "Groceries", "Café", "niños",
-      "milk", "brood", "TICKET-123", "LICENSE", "Media", "png", "Deeply",
-    ]) {
-      expect(everything.includes(secret), `server holds the plaintext "${secret}"`).toBe(false);
+    const needles = FILES.flatMap(([path, content]) => [
+      path,
+      ...(typeof content === "string" ? content.split("\n") : []),
+    ])
+      .map((n) => n.trim())
+      .filter((n) => Buffer.byteLength(n, "utf8") >= MIN_NEEDLE_BYTES);
+
+    // Guard against the check silently shrinking to nothing.
+    expect(needles.length).toBeGreaterThanOrEqual(10);
+
+    for (const needle of needles) {
+      expect(store_bytes.includes(Buffer.from(needle, "utf8")), `server holds the plaintext "${needle}"`).toBe(false);
     }
   });
 

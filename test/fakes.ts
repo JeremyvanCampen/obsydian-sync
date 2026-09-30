@@ -10,7 +10,21 @@
  */
 
 import type { VaultAdapter } from "../src/adapter.ts";
-import type { HttpRequest, HttpResponse, Transport } from "../src/api.ts";
+import { type HttpRequest, type HttpResponse, SyncApi, type Transport } from "../src/api.ts";
+import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
+import type { KdfParams } from "../src/types.ts";
+
+/**
+ * The KDF parameters the fake server advertises. Exported so tests derive keys
+ * from what the server says rather than from their own copy of it — otherwise
+ * changing the fake's salt would leave every test passing against keys this
+ * "server" could never have produced. Low iterations keep the suite fast.
+ */
+export const FAKE_KDF: KdfParams = {
+  alg: "PBKDF2-HMAC-SHA256",
+  salt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  iterations: 1000,
+};
 
 // --- vault ----------------------------------------------------------------
 
@@ -182,7 +196,7 @@ export class FakeServer {
       return json(200, {
         protocol: 1,
         vaultId: this.vaultId,
-        kdf: { alg: "PBKDF2-HMAC-SHA256", salt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", iterations: 1000 },
+        kdf: FAKE_KDF,
         kdfCheck: this.kdfCheck,
         head: this.head(),
         yourDeviceId: deviceId,
@@ -260,4 +274,20 @@ function json(status: number, body: unknown): HttpResponse {
 
 function raw(status: number, bytes: Uint8Array): HttpResponse {
   return { status, text: "", arrayBuffer: bytes.slice().buffer };
+}
+
+/** A fake server already initialised with a passphrase, and the keys for it. */
+export async function initializedFakeVault(
+  passphrase = "correct horse battery staple",
+  tokens: Record<string, string> = { "token-a": "macbook", "token-b": "iphone" },
+): Promise<{ server: FakeServer; keys: VaultKeys }> {
+  const server = new FakeServer(tokens);
+  const keys = await deriveKeys(await deriveMasterKey(passphrase, FAKE_KDF));
+  server.kdfCheck = await makeKdfCheck(keys, server.vaultId);
+  return { server, keys };
+}
+
+/** A client for the fake server, with retries that do not actually wait. */
+export function fakeApi(server: FakeServer, token: string): SyncApi {
+  return new SyncApi({ baseUrl: "http://fake", token, transport: server.transportFor(token), sleep: async () => {} });
 }

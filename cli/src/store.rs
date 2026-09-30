@@ -118,16 +118,7 @@ impl Store {
     }
 
     pub fn blob(&self, blob_id: &str) -> Result<Option<Vec<u8>>> {
-        anyhow::ensure!(
-            blob_id.len() == 32 && blob_id.bytes().all(|b| b.is_ascii_hexdigit()),
-            "malformed blobId {blob_id:?}"
-        );
-        let path = self
-            .root
-            .join("blobs")
-            .join(&blob_id[0..2])
-            .join(&blob_id[2..4])
-            .join(blob_id);
+        let path = blob_path(&self.root, blob_id)?;
 
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -135,6 +126,24 @@ impl Store {
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
+}
+
+/// Where a blob lives in a store: `blobs/<aa>/<bb>/<id>`.
+///
+/// The one place this layout is spelled out on the reading side, so the test
+/// fixture writes stores through it too. A fixture with its own copy only
+/// proves the CLI agrees with itself, not with the server.
+///
+/// The id must be exactly 32 *lowercase* hex characters — the server's rule
+/// (server/src/ids.rs), which is also what makes the path safe to join. Uppercase
+/// is refused rather than accepted: the server never writes it, so an uppercase
+/// id can only name a file the server did not create.
+pub fn blob_path(root: &Path, blob_id: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        blob_id.len() == 32 && blob_id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "malformed blobId {blob_id:?}: must be 32 lowercase hex characters"
+    );
+    Ok(root.join("blobs").join(&blob_id[0..2]).join(&blob_id[2..4]).join(blob_id))
 }
 
 /// A decrypted journal operation. See PROTOCOL.md §5.
@@ -233,9 +242,6 @@ pub fn safe_relative_path(path: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-pub fn is_under(root: &Path, candidate: &Path) -> bool {
-    candidate.starts_with(root)
-}
 
 #[cfg(test)]
 mod tests {
@@ -255,6 +261,14 @@ mod tests {
         assert!(safe_relative_path("/etc/passwd").is_err());
         assert!(safe_relative_path("").is_err());
         assert!(safe_relative_path("a//b.md").is_err());
+    }
+
+    #[test]
+    fn blob_path_refuses_uppercase_the_server_never_writes() {
+        let root = Path::new("/store");
+        assert!(blob_path(root, "0123456789abcdef0123456789abcdef").is_ok());
+        assert!(blob_path(root, "0123456789ABCDEF0123456789abcdef").is_err());
+        assert!(blob_path(root, "../../../../../../../etc/passwd00").is_err());
     }
 
     #[test]

@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SyncApi, type Transport } from "../src/api.ts";
+import { SyncApi } from "../src/api.ts";
 import {
   type Bytes,
   type VaultKeys,
@@ -29,6 +29,7 @@ import {
   verifyKdfCheck,
 } from "../src/crypto.ts";
 import { prepareEntry, replay } from "../src/journal.ts";
+import { nodeTransport } from "./node-adapter.ts";
 import { type RunningServer, startServer } from "./server-harness.ts";
 
 const BIN = fileURLToPath(new URL("../target/debug/obsydian-sync-server", import.meta.url));
@@ -39,24 +40,6 @@ let dataDir: string;
 let api: SyncApi;
 let keys: VaultKeys;
 
-/**
- * Mirrors `requestUrl`'s contract: no throwing on non-2xx, and both a text and
- * an arrayBuffer view of the body. If this diverges from Obsidian's behaviour
- * the test stops being evidence, so it is kept deliberately thin.
- */
-const nodeTransport: Transport = async (req) => {
-  const res = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as BodyInit),
-  });
-  const buf = await res.arrayBuffer();
-  return {
-    status: res.status,
-    text: new TextDecoder().decode(buf),
-    arrayBuffer: buf,
-  };
-};
 
 beforeAll(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "obsydian-integration-"));

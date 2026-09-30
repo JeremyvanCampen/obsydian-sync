@@ -8,20 +8,16 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { SyncApi } from "../src/api.ts";
-import { type VaultKeys, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
+import { type VaultKeys, deriveKeys, deriveMasterKey } from "../src/crypto.ts";
 import { runSync } from "../src/sync.ts";
 import type { SyncSummary } from "../src/sync.ts";
-import { FakeAdapter, FakeServer } from "./fakes.ts";
-
-const KDF = { alg: "PBKDF2-HMAC-SHA256" as const, salt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", iterations: 1000 };
+import { FAKE_KDF, FakeAdapter, type FakeServer, fakeApi, initializedFakeVault } from "./fakes.ts";
 
 let server: FakeServer;
 let keys: VaultKeys;
 
 async function setup(): Promise<void> {
-  server = new FakeServer({ "token-a": "macbook", "token-b": "iphone" });
-  keys = await deriveKeys(await deriveMasterKey("correct horse battery staple", KDF));
-  server.kdfCheck = await makeKdfCheck(keys, server.vaultId);
+  ({ server, keys } = await initializedFakeVault());
 }
 
 class Device {
@@ -29,12 +25,7 @@ class Device {
   private readonly api: SyncApi;
 
   constructor(token: string, clockOffset = 0) {
-    this.api = new SyncApi({
-      baseUrl: "http://fake",
-      token,
-      transport: server.transportFor(token),
-      sleep: async () => {},
-    });
+    this.api = fakeApi(server, token);
     this.adapter.clock += clockOffset;
   }
 
@@ -153,6 +144,34 @@ describe("ordinary two-device operation", () => {
     expect(b.adapter.text("Empty.md")).toBe("");
   });
 
+  it("a sync with nothing to do costs one request", async () => {
+    // Focus and interval triggers usually find nothing new, so this is the
+    // common case — and on a phone every round trip is 100-200 ms. meta.head
+    // already says where the journal ends, so there is nothing to pull.
+    const a = new Device("token-a");
+    a.adapter.put("a.md", "x");
+    await a.sync();
+    await a.sync(); // pulls back its own entry once, by design
+
+    const before = server.log.length;
+    await a.sync();
+    expect(server.log.slice(before)).toEqual(["GET http://fake/v1/meta"]);
+  });
+
+  it("pushing a small edit sends no existence check first", async () => {
+    // PUT is idempotent server-side, and an edited note almost never exists
+    // there already, so a HEAD would be a round trip spent learning "no".
+    const a = new Device("token-a");
+    a.adapter.put("a.md", "x");
+    await a.sync();
+    await a.sync();
+
+    a.adapter.put("a.md", "edited");
+    const before = server.log.length;
+    await a.sync();
+    expect(server.log.slice(before).some((r) => r.startsWith("HEAD"))).toBe(false);
+  });
+
   it("round-trips binary content byte-for-byte", async () => {
     const a = new Device("token-a");
     const b = new Device("token-b");
@@ -232,7 +251,7 @@ describe("the server learns nothing", () => {
 
   it("refuses to sync against a vault whose passphrase does not match", async () => {
     const a = new Device("token-a");
-    keys = await deriveKeys(await deriveMasterKey("the wrong passphrase", KDF));
+    keys = await deriveKeys(await deriveMasterKey("the wrong passphrase", FAKE_KDF));
 
     await expect(a.sync()).rejects.toThrow(/passphrase does not match/);
   });

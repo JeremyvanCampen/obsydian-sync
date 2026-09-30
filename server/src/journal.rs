@@ -1,4 +1,4 @@
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::ids::validate_id;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,9 @@ struct State {
     seen: HashMap<String, u64>,
 }
 
+/// Serialised straight into the append response; it is exactly that shape.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Appended {
     pub entry_id: String,
     pub seq: u64,
@@ -196,17 +199,10 @@ impl Journal {
             out.push(entry);
         }
 
-        out.sort_by_key(|e| e.seq);
         Ok((out, more))
     }
 }
 
-impl From<anyhow::Error> for ApiError {
-    fn from(e: anyhow::Error) -> Self {
-        tracing::error!(error = %e, "internal error");
-        Self::new(crate::error::ErrorCode::Internal, "internal error")
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -54,16 +54,13 @@ async fn main() -> Result<()> {
     let journal = journal::Journal::open(&config.data_dir)?;
     let blobs = blobs::BlobStore::new(&config.data_dir)?;
     let bind = config.bind;
-    let data_dir = config.data_dir.clone();
 
     let state = Arc::new(routes::AppState {
         config,
         meta: RwLock::new(meta),
         journal,
         blobs,
-        data_dir,
         git,
-        gc_lock: RwLock::new(()),
     });
 
     let shutdown_state = state.clone();

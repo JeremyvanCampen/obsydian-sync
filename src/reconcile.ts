@@ -17,20 +17,32 @@ import type {
   RemoteTombstone,
 } from "./types.ts";
 
+/**
+ * The local file as reconcile saw it when it made the decision.
+ *
+ * The vault can change between the scan and the moment apply acts — autosave
+ * fires while a sync runs. Every action that touches a local file carries what
+ * it expects to find, and apply refuses to act if the file no longer matches.
+ * One rule for every action, rather than a separate guard per action kind,
+ * each written after the race it covers was found.
+ */
+export type Expect = { blobId: string } | "absent";
+
 export type Action =
   /** Upload local content (if the server lacks it) and journal a `put`. */
-  | { kind: "push-put"; path: string; local: LocalFile }
-  /**
-   * Journal a `put` for content the server already holds — a conflict copy, or
-   * any path adopting an existing blob. No upload.
-   */
-  | { kind: "push-copy"; path: string; blobId: string; size: number; mtime: number }
+  | { kind: "push-put"; path: string; local: LocalFile; expect: Expect }
   /** Journal a `delete`. `mtime` is the time of *deletion*, not of the content. */
-  | { kind: "push-delete"; path: string; mtime: number }
+  | { kind: "push-delete"; path: string; mtime: number; expect: Expect }
   /** Download and write the remote content. */
-  | { kind: "pull-put"; path: string; remote: RemotePresent }
+  | { kind: "pull-put"; path: string; remote: RemotePresent; expect: Expect }
+  /**
+   * Write the remote content to a new path *and* journal that path — a conflict
+   * copy. One action, so its journal entry comes from the file it just wrote
+   * rather than from a guess about what an earlier action recorded.
+   */
+  | { kind: "copy-remote"; path: string; remote: RemotePresent; expect: Expect }
   /** Move the local file to `.trash` — only ever against a real tombstone. */
-  | { kind: "pull-delete"; path: string; remote: RemoteTombstone }
+  | { kind: "pull-delete"; path: string; remote: RemoteTombstone; expect: Expect }
   /** Both sides already agree; record it in base and touch nothing. */
   | { kind: "adopt-base"; path: string; blobId: string; size: number; mtime: number }
   /** Both sides deleted it; forget it. */
@@ -66,11 +78,6 @@ export interface ReconcileInput {
   base: BaseIndex;
   local: LocalIndex;
   remote: RemoteIndex;
-  /**
-   * This device's id. Retained for logging and for callers; conflict files are
-   * named after the device the conflicting content came from, not this one.
-   */
-  deviceId: string;
   /** Injected so conflict filenames are deterministic under test. */
   now: Date;
   /**
@@ -179,7 +186,7 @@ export function reconcile(input: ReconcileInput): Plan {
         // deletion unrecorded, and the next complete index would pull the file
         // straight back — a resurrection by another route. Record it instead;
         // a tombstone for a path the server does not know is harmless.
-        actions.push({ kind: "push-delete", path, mtime: now.getTime() });
+        actions.push({ kind: "push-delete", path, mtime: now.getTime(), expect: "absent" });
         notes.push({
           level: "warn",
           path,
@@ -187,7 +194,7 @@ export function reconcile(input: ReconcileInput): Plan {
             "deleted here, and the remote has no record of the path; recording the deletion anyway",
         });
       } else {
-        actions.push({ kind: "push-put", path, local: l! });
+        actions.push({ kind: "push-put", path, local: l!, expect: { blobId: l!.blobId } });
         notes.push({
           level: "warn",
           path,
@@ -202,13 +209,18 @@ export function reconcile(input: ReconcileInput): Plan {
         return; // nothing to do
 
       case "same:modified":
-        actions.push({ kind: "pull-put", path, remote: r as RemotePresent });
+        actions.push({ kind: "pull-put", path, remote: r as RemotePresent, expect: { blobId: l!.blobId } });
         return;
 
       case "same:deleted":
         // The only route by which a local file is deleted: an explicit
         // tombstone, against local content we have not touched since syncing.
-        actions.push({ kind: "pull-delete", path, remote: r as RemoteTombstone });
+        actions.push({
+          kind: "pull-delete",
+          path,
+          remote: r as RemoteTombstone,
+          expect: { blobId: l!.blobId },
+        });
         notes.push({
           level: "info",
           path,
@@ -217,7 +229,7 @@ export function reconcile(input: ReconcileInput): Plan {
         return;
 
       case "modified:same":
-        actions.push({ kind: "push-put", path, local: l! });
+        actions.push({ kind: "push-put", path, local: l!, expect: { blobId: l!.blobId } });
         return;
 
       case "modified:modified": {
@@ -240,7 +252,7 @@ export function reconcile(input: ReconcileInput): Plan {
         // Local work exists that the deleting device never saw. Losing an edit
         // is worse than an unwanted file returning, and the return is visible
         // while the lost edit would not be.
-        actions.push({ kind: "push-put", path, local: l! });
+        actions.push({ kind: "push-put", path, local: l!, expect: { blobId: l!.blobId } });
         notes.push({
           level: "warn",
           path,
@@ -253,12 +265,12 @@ export function reconcile(input: ReconcileInput): Plan {
         // A content timestamp is by construction older than every copy of that
         // file on every other device, which would make the untracked-tombstone
         // rule below re-push all of them.
-        actions.push({ kind: "push-delete", path, mtime: now.getTime() });
+        actions.push({ kind: "push-delete", path, mtime: now.getTime(), expect: "absent" });
         return;
 
       case "deleted:modified":
         // Mirror of the case above: someone edited it after we deleted it.
-        actions.push({ kind: "pull-put", path, remote: r as RemotePresent });
+        actions.push({ kind: "pull-put", path, remote: r as RemotePresent, expect: "absent" });
         notes.push({
           level: "warn",
           path,
@@ -283,13 +295,13 @@ export function reconcile(input: ReconcileInput): Plan {
     r: ReturnType<RemoteIndex["get"]>,
   ): void {
     if (l && !r) {
-      actions.push({ kind: "push-put", path, local: l });
+      actions.push({ kind: "push-put", path, local: l, expect: { blobId: l.blobId } });
       return;
     }
 
     if (!l && r) {
       if (r.state === "present") {
-        actions.push({ kind: "pull-put", path, remote: r });
+        actions.push({ kind: "pull-put", path, remote: r, expect: "absent" });
       }
       // A tombstone for a file this device never had is already satisfied.
       return;
@@ -313,14 +325,17 @@ export function reconcile(input: ReconcileInput): Plan {
       // only evidence available is the timestamps, so use them, and prefer
       // deleting (recoverable from .trash) over resurrecting (silent).
       if (l.mtime > r.mtime) {
-        actions.push({ kind: "push-put", path, local: l });
+        actions.push({ kind: "push-put", path, local: l, expect: { blobId: l.blobId } });
         notes.push({
           level: "warn",
           path,
           message: "deleted remotely, but the local file is newer than the deletion; keeping it",
         });
       } else {
-        actions.push({ kind: "pull-delete", path, remote: r });
+        // Expecting the scanned content: if it is untouched when apply runs,
+        // the timestamp judgement above still holds. If it changed, apply keeps
+        // it — no second copy of this rule is needed there.
+        actions.push({ kind: "pull-delete", path, remote: r, expect: { blobId: l.blobId } });
         untrackedDeletions++;
         notes.push({
           // A warning, not an informational note: this deletes a file on
@@ -346,18 +361,10 @@ export function reconcile(input: ReconcileInput): Plan {
     const origin = r.deviceId ?? "another device";
     const conflictPath = allocateConflictPath(path, origin, now, taken);
 
-    // Write the remote bytes to the sidecar and record them in base...
-    actions.push({ kind: "pull-put", path: conflictPath, remote: r });
-    // ...then journal that path, reusing the blob the server already holds.
-    actions.push({
-      kind: "push-copy",
-      path: conflictPath,
-      blobId: r.blobId,
-      size: r.size,
-      mtime: now.getTime(),
-    });
+    // Write the remote version beside the local one and journal it...
+    actions.push({ kind: "copy-remote", path: conflictPath, remote: r, expect: "absent" });
     // ...and push the local version at its original path.
-    actions.push({ kind: "push-put", path, local: l });
+    actions.push({ kind: "push-put", path, local: l, expect: { blobId: l.blobId } });
 
     notes.push({ level: "warn", path, message: `${why}; remote version kept as "${conflictPath}"` });
   }

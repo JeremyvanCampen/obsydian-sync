@@ -11,7 +11,7 @@
  */
 
 import type { VaultAdapter } from "./adapter.ts";
-import type { BaseFile, BaseIndex, BaseState, RemoteEntry, RemoteIndex } from "./types.ts";
+import type { BaseFile, BaseState, RemoteEntry } from "./types.ts";
 import { PROTOCOL_VERSION } from "./types.ts";
 
 export const PLUGIN_DIR = ".obsidian/plugins/obsydian-sync";
@@ -21,17 +21,8 @@ export function emptyState(vaultId: string, deviceId: string): BaseState {
   return { protocol: PROTOCOL_VERSION, vaultId, deviceId, lastSeq: 0, files: {}, remote: {} };
 }
 
-export function toIndex(state: BaseState): BaseIndex {
-  return new Map(Object.entries(state.files));
-}
 
-export function fromIndex(state: BaseState, index: BaseIndex): BaseState {
-  return { ...state, files: Object.fromEntries(index) };
-}
 
-export function toRemoteIndex(state: BaseState): RemoteIndex {
-  return new Map(Object.entries(state.remote ?? {}));
-}
 
 /**
  * Reads the base state, or returns null when there is none to read.

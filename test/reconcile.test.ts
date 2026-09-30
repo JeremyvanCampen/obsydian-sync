@@ -9,7 +9,6 @@ import {
 import type { BaseFile, BaseIndex, LocalFile, LocalIndex, RemoteEntry, RemoteIndex } from "../src/types.ts";
 
 const NOW = new Date(2026, 8, 13, 14, 2); // 2026-09-13 14.02 local
-const DEVICE = "macbook";
 
 const baseFile = (blobId: string, mtime = 1000): BaseFile => ({ blobId, size: blobId.length, mtime });
 const localFile = (path: string, blobId: string, mtime = 1000): LocalFile => ({
@@ -36,7 +35,7 @@ function run(opts: {
   const base: BaseIndex = new Map(Object.entries(opts.base ?? {}));
   const local: LocalIndex = new Map(Object.entries(opts.local ?? {}));
   const remote: RemoteIndex = new Map(Object.entries(opts.remote ?? {}));
-  return reconcile({ base, local, remote, deviceId: DEVICE, now: NOW });
+  return reconcile({ base, local, remote, now: NOW });
 }
 
 const kinds = (plan: Plan): string[] => plan.actions.map((a) => a.kind);
@@ -102,12 +101,12 @@ describe("tracked paths: the full matrix", () => {
     });
     const CONFLICT = "a (conflict from iphone 2026-09-13 14.02).md";
 
-    // A conflict is three primitive actions, not one compound one: write the
-    // remote version beside the local one, journal it, and push the local one.
+    // Two actions: write-and-journal the remote version beside the local one,
+    // and push the local one where it was. Each carries what it expects to find
+    // on disk, so apply will not act on a file that changed after the scan.
     expect(plan.actions).toEqual([
-      { kind: "pull-put", path: CONFLICT, remote: present("cc") },
-      { kind: "push-copy", path: CONFLICT, blobId: "cc", size: 2, mtime: NOW.getTime() },
-      { kind: "push-put", path: "a.md", local: localFile("a.md", "bb") },
+      { kind: "copy-remote", path: CONFLICT, remote: present("cc"), expect: "absent" },
+      { kind: "push-put", path: "a.md", local: localFile("a.md", "bb"), expect: { blobId: "bb" } },
     ]);
     expect(plan.notes[0]?.level).toBe("warn");
   });
@@ -125,7 +124,7 @@ describe("tracked paths: the full matrix", () => {
 
     // Apply it: local keeps "bb" at a.md and gains "cc" at the sidecar; both
     // paths are pushed, so base and remote end up agreeing on both.
-    expect(first.actions).toHaveLength(3);
+    expect(first.actions).toHaveLength(2);
 
     const second = run({
       base: { "a.md": baseFile("bb"), [CONFLICT]: baseFile("cc") },
@@ -153,7 +152,7 @@ describe("tracked paths: the full matrix", () => {
     });
     // Not the content's mtime: a content timestamp is older than every copy of
     // that file on every other device, which would make each of them re-push it.
-    expect(only(plan)).toEqual({ kind: "push-delete", path: "a.md", mtime: NOW.getTime() });
+    expect(only(plan)).toEqual({ kind: "push-delete", path: "a.md", mtime: NOW.getTime(), expect: "absent" });
   });
 
   it("deleted / modified -> the remote edit wins and is logged", () => {
@@ -248,7 +247,7 @@ describe("untracked paths", () => {
       local: { "a.md": localFile("a.md", "aa") },
       remote: { "a.md": present("bb") },
     });
-    expect(kinds(plan)).toEqual(["pull-put", "push-copy", "push-put"]);
+    expect(kinds(plan)).toEqual(["copy-remote", "push-put"]);
     // The local version stays exactly where it was.
     expect(plan.actions.find((a) => a.kind === "push-put")?.path).toBe("a.md");
   });
@@ -358,7 +357,7 @@ describe("conflict filenames", () => {
       local: { "a.md": localFile("a.md", "bb") },
       remote: { "a.md": present("cc", 1, 1000, "iphone") },
     });
-    const copy = plan.actions.find((a) => a.kind === "push-copy");
+    const copy = plan.actions.find((a) => a.kind === "copy-remote");
     expect(copy?.path).toContain("conflict from iphone");
     expect(copy?.path).not.toContain("macbook");
   });
@@ -370,7 +369,7 @@ describe("conflict filenames", () => {
       local: { "a.md": localFile("a.md", "bb") },
       remote: { "a.md": { state: "present", blobId: "cc", size: 2, mtime: 1000, seq: 1 } },
     });
-    const copy = plan.actions.find((a) => a.kind === "push-copy");
+    const copy = plan.actions.find((a) => a.kind === "copy-remote");
     expect(copy?.path).toContain("conflict from another device");
   });
 
@@ -380,7 +379,7 @@ describe("conflict filenames", () => {
       local: { "a.md": localFile("a.md", "bb"), "b.md": localFile("b.md", "bb") },
       remote: { "a.md": present("cc"), "b.md": present("cc") },
     });
-    const names = plan.actions.filter((a) => a.kind === "push-copy").map((a) => a.path);
+    const names = plan.actions.filter((a) => a.kind === "copy-remote").map((a) => a.path);
     expect(names).toHaveLength(2);
     expect(new Set(names).size).toBe(2);
   });
@@ -457,5 +456,32 @@ describe("determinism", () => {
     const paths = run(input).actions.map((a) => a.path);
     expect(paths).toEqual(["a.md", "m.md", "z.md"]);
     expect(run(input)).toEqual(run(input));
+  });
+});
+
+describe("excluded paths", () => {
+  const excluded = (path: string) => path.startsWith("Private/");
+
+  it("forgets a tracked excluded path without journalling a deletion", () => {
+    const base: BaseIndex = new Map([["Private/a.md", baseFile("aa")]]);
+    const plan = reconcile({
+      base,
+      local: new Map(),
+      remote: new Map([["Private/a.md", present("aa")]]),
+      now: NOW,
+      isExcluded: excluded,
+    });
+    expect(plan.actions).toEqual([{ kind: "drop-base", path: "Private/a.md" }]);
+  });
+
+  it("ignores an excluded path the device never tracked", () => {
+    const plan = reconcile({
+      base: new Map(),
+      local: new Map(),
+      remote: new Map([["Private/a.md", present("aa")]]),
+      now: NOW,
+      isExcluded: excluded,
+    });
+    expect(plan.actions).toEqual([]);
   });
 });

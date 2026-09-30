@@ -25,8 +25,6 @@ export interface ApplyOptions {
 }
 
 export interface ApplyResult {
-  /** Mutated in place and returned: the caller persists this. */
-  base: BaseIndex;
   pushed: number;
   pulled: number;
   /** Files moved to local trash because the vault records them as deleted. */
@@ -35,26 +33,15 @@ export interface ApplyResult {
    * lumping them in would hide them, and leaving them uncounted made a sync
    * that propagated only deletions report doing nothing at all. */
   pushedDeletions: number;
-  /** Sequence numbers assigned to everything we appended. */
-  highestSeqWritten: number;
 }
 
+/** Mutates `base` in place; the caller persists it. */
 export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
   const { adapter, api, keys, deviceId, base, plan } = opts;
-
-  const result: ApplyResult = {
-    base,
-    pushed: 0,
-    pulled: 0,
-    deletedLocally: 0,
-    pushedDeletions: 0,
-    highestSeqWritten: 0,
-  };
+  const result: ApplyResult = { pushed: 0, pulled: 0, deletedLocally: 0, pushedDeletions: 0 };
 
   // The plan's own notes are emitted by the caller, which owns reporting.
-  // Emitting them here as well logged every reconciler decision twice, halving
-  // the useful history in a capped log exactly when it is being read.
-  // Notes raised *below* are this module's own and are not in plan.notes.
+  // Emitting them here as well logged every reconciler decision twice.
 
   // Journal entries are collected and appended in one batch at the end.
   //
@@ -64,139 +51,90 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
   // only record a pull in base once the file is really on disk.
   const pending: JournalPayload[] = [];
 
+  /**
+   * The one execution-time check. Reconcile recorded what each file looked
+   * like when it decided; if the file has changed since, acting now would
+   * overwrite, trash or mis-publish an edit that nothing has journalled.
+   * Skip it — the next sync sees the change and decides afresh.
+   */
+  const unchanged = async (
+    action: Extract<Action, { expect: unknown }>,
+    current: Bytes | null,
+  ): Promise<boolean> => {
+    const ok =
+      action.expect === "absent"
+        ? current === null
+        : current !== null && (await blobIdFor(keys, current)) === action.expect.blobId;
+    if (!ok) {
+      opts.onNote?.({
+        level: "warn",
+        path: action.path,
+        message: "changed during sync; leaving it for the next run",
+      });
+    }
+    return ok;
+  };
+
   for (const action of plan.actions) {
     switch (action.kind) {
       case "push-put": {
+        // The bytes checked are the bytes uploaded, so there is no window in
+        // which an edit could slip between the check and the upload. Uploading
+        // edited bytes under the scan-time blobId would poison the store:
+        // every device would resolve that id to the wrong content forever, and
+        // since the AAD is only the blobId, decryption would still succeed.
         const content = await readLocal(adapter, action.path);
-        if (!content) {
-          // The file vanished between scan and apply. Skip it; the next sync
-          // sees the deletion properly rather than pushing a half-truth.
-          opts.onNote?.({
-            level: "warn",
-            path: action.path,
-            message: "disappeared during sync; leaving it for the next run",
-          });
-          continue;
-        }
+        if (!(await unchanged(action, content))) continue;
 
-        // The bytes on disk now may not be the bytes the scan hashed —
-        // autosave fires while a sync runs. Uploading these bytes under the
-        // scan-time blobId would poison the content-addressed store: every
-        // device would forever resolve that id to the wrong content, and
-        // because the AAD is only the blobId, decryption would still succeed.
-        //
-        // This re-hashes content the scan already hashed. The cost is accepted:
-        // the file has to be read here anyway to upload it, HMAC-SHA256 over
-        // bytes already in memory is cheap next to that read, and it only
-        // applies to files actually being pushed — the scan's fast path means
-        // a steady-state sync reads almost nothing.
-        const actual = await blobIdFor(keys, content);
-        if (actual !== action.local.blobId) {
-          opts.onNote?.({
-            level: "info",
-            path: action.path,
-            message: "changed during sync; leaving it for the next run",
-          });
-          continue;
-        }
-
-        await uploadBlob(api, keys, action.local.blobId, content);
-        pending.push({
-          op: "put",
-          path: action.path,
-          blobId: action.local.blobId,
-          size: action.local.size,
-          mtime: action.local.mtime,
-        });
-        base.set(action.path, {
-          blobId: action.local.blobId,
-          size: action.local.size,
-          mtime: action.local.mtime,
-        });
-        result.pushed++;
-        break;
-      }
-
-      case "push-copy": {
-        // The server already holds this blob (a conflict copy reuses the
-        // remote's). Journal the path; upload nothing.
-        //
-        // If a pull-put earlier in this plan already wrote the file, keep the
-        // mtime it recorded from the filesystem. Overwriting it with "now"
-        // would mismatch what the next scan sees on disk, re-hashing the file
-        // on every sync forever without ever converging.
-        // Take both halves of the fast-path key from whatever pull-put just
-        // recorded off the filesystem. Mixing one from disk and one from the
-        // remote journal leaves the pair unable to match, and the file is
-        // re-hashed on every sync forever — the failure this exists to avoid.
-        const existing = base.get(action.path);
-        const reuse = existing?.blobId === action.blobId;
-        const mtime = reuse ? existing.mtime : action.mtime;
-        const size = reuse ? existing.size : action.size;
-
-        pending.push({ op: "put", path: action.path, blobId: action.blobId, size, mtime });
-        base.set(action.path, { blobId: action.blobId, size, mtime });
+        await uploadBlob(api, keys, action.local.blobId, content!);
+        const { blobId, size, mtime } = action.local;
+        pending.push({ op: "put", path: action.path, blobId, size, mtime });
+        base.set(action.path, { blobId, size, mtime });
         result.pushed++;
         break;
       }
 
       case "push-delete": {
+        // A file restored between scan and apply must not be deleted everywhere.
+        if (!(await unchanged(action, await readLocal(adapter, action.path)))) continue;
         pending.push({ op: "delete", path: action.path, mtime: action.mtime });
         base.delete(action.path);
         result.pushedDeletions++;
         break;
       }
 
-      case "pull-put": {
+      case "pull-put":
+      case "copy-remote": {
+        // Download first, check last: the check sits immediately before the
+        // write, keeping the window for an edit to slip in as short as it can be.
         const content = await downloadBlob(api, keys, action.remote.blobId);
+        if (!(await unchanged(action, await readLocal(adapter, action.path)))) continue;
+
         await writeLocal(adapter, action.path, content);
         const stat = await adapter.stat(action.path);
-        base.set(action.path, {
+        // Record what the filesystem actually gave the file: the next scan's
+        // fast path compares (mtime, size) against what it will see on disk,
+        // and a mismatch re-hashes the file on every sync without converging.
+        const entry = {
           blobId: action.remote.blobId,
           size: content.length,
-          // Record the mtime the filesystem actually gave the file, not the
-          // one the remote reported: the next scan's fast path compares
-          // against what it will see on disk.
           mtime: stat?.mtime ?? action.remote.mtime,
-        });
+        };
+        base.set(action.path, entry);
         result.pulled++;
+
+        if (action.kind === "copy-remote") {
+          // Reuses the blob the server already holds; nothing to upload.
+          pending.push({ op: "put", path: action.path, ...entry });
+          result.pushed++;
+        }
         break;
       }
 
       case "pull-delete": {
         const current = await readLocal(adapter, action.path);
-        if (current) {
-          // The reconciler authorised this at scan time. If the file changed
-          // since, that change has never been journalled anywhere, and trashing
-          // it would discard the only copy.
-          const previous = base.get(action.path);
-
-          if (previous) {
-            // Tracked: authorised because the content matched the last sync.
-            const actual = await blobIdFor(keys, current);
-            if (actual !== previous.blobId) {
-              opts.onNote?.({
-                level: "warn",
-                path: action.path,
-                message: "edited during sync; not trashing it, and pushing the edit next run",
-              });
-              break;
-            }
-          } else {
-            // Untracked: authorised only because the file looked older than the
-            // tombstone — a judgement on timestamps alone, and the weakest
-            // ground on which anything here deletes. Re-apply that test with
-            // fresh data rather than trusting a reading from before the sync.
-            const stat = await adapter.stat(action.path);
-            if (!stat || stat.mtime > action.remote.mtime) {
-              opts.onNote?.({
-                level: "warn",
-                path: action.path,
-                message: "changed during sync and is now newer than the deletion; keeping it",
-              });
-              break;
-            }
-          }
+        if (current !== null) {
+          if (!(await unchanged(action, current))) break;
           // Always to the trash, never a hard remove. If the reconciler is
           // ever wrong, this is the difference between an annoyance and a loss.
           await adapter.trashLocal(action.path);
@@ -207,11 +145,7 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
       }
 
       case "adopt-base": {
-        base.set(action.path, {
-          blobId: action.blobId,
-          size: action.size,
-          mtime: action.mtime,
-        });
+        base.set(action.path, { blobId: action.blobId, size: action.size, mtime: action.mtime });
         break;
       }
 
@@ -219,16 +153,11 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
         base.delete(action.path);
         break;
       }
-
     }
   }
 
   if (pending.length > 0) {
-    const prepared = await Promise.all(pending.map((p) => prepareEntry(p, keys, deviceId)));
-    const response = await api.appendJournal(prepared);
-    for (const a of response.assigned) {
-      result.highestSeqWritten = Math.max(result.highestSeqWritten, a.seq);
-    }
+    await api.appendJournal(await Promise.all(pending.map((p) => prepareEntry(p, keys, deviceId))));
   }
 
   return result;
@@ -245,15 +174,22 @@ async function writeLocal(adapter: VaultAdapter, path: string, content: Bytes): 
   await adapter.writeBinary(path, content.slice().buffer);
 }
 
+/**
+ * Below this size, PUT straight away: an edited note almost never exists on the
+ * server already, so asking first costs a round-trip to learn "no". PUT is
+ * idempotent server-side, so a blob that does exist is simply not rewritten.
+ * Above it, the HEAD pays for itself — a multi-megabyte plugin bundle that
+ * another device already uploaded is not sent again.
+ */
+export const HEAD_BEFORE_PUT_BYTES = 256 * 1024;
+
 async function uploadBlob(
   api: SyncApi,
   keys: VaultKeys,
   blobId: string,
   content: Bytes,
 ): Promise<void> {
-  // Content addressing makes this cheap: a renamed or copied file, or a note
-  // reverted to an earlier state, uploads nothing.
-  if (await api.hasBlob(blobId)) return;
+  if (content.length >= HEAD_BEFORE_PUT_BYTES && (await api.hasBlob(blobId))) return;
   await api.putBlob(blobId, await seal(keys.content, content, aadForBlob(blobId)));
 }
 
@@ -263,5 +199,3 @@ async function downloadBlob(api: SyncApi, keys: VaultKeys, blobId: string): Prom
   // blob produces a decryption failure rather than a wrong file on disk.
   return unseal(keys.content, sealed, aadForBlob(blobId));
 }
-
-export type { Action };

@@ -27,6 +27,10 @@ export const DEFAULT_SETTINGS: ObsydianSyncSettings = {
   intervalMinutes: 5,
 };
 
+type BooleanSetting = {
+  [K in keyof ObsydianSyncSettings]: ObsydianSyncSettings[K] extends boolean ? K : never;
+}[keyof ObsydianSyncSettings];
+
 export class ObsydianSyncSettingTab extends PluginSettingTab {
   constructor(
     app: App,
@@ -86,37 +90,22 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("When to sync").setHeading();
 
-    new Setting(containerEl)
-      .setName("On startup")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.syncOnStartup).onChange(async (v) => {
-          this.plugin.settings.syncOnStartup = v;
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.toggle(containerEl, "On startup", undefined, "syncOnStartup");
 
-    new Setting(containerEl)
-      .setName("After changes")
-      .setDesc("Sync once editing has been quiet for a few seconds.")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.syncOnChange).onChange(async (v) => {
-          this.plugin.settings.syncOnChange = v;
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.toggle(
+      containerEl,
+      "After changes",
+      "Sync once editing has been quiet for a few seconds.",
+      "syncOnChange",
+    );
 
-    new Setting(containerEl)
-      .setName("When the app regains focus")
-      .setDesc(
-        "The main sync moment on mobile: iOS and Android suspend background apps, so " +
-          "returning to Obsidian is usually the first chance to sync.",
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.syncOnFocus).onChange(async (v) => {
-          this.plugin.settings.syncOnFocus = v;
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.toggle(
+      containerEl,
+      "When the app regains focus",
+      "The main sync moment on mobile: iOS and Android suspend background apps, so " +
+        "returning to Obsidian is usually the first chance to sync.",
+      "syncOnFocus",
+    );
 
     new Setting(containerEl)
       .setName("Quiet period")
@@ -146,18 +135,13 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("What to sync").setHeading();
 
-    new Setting(containerEl)
-      .setName("Vault settings (.obsidian)")
-      .setDesc(
-        "Appearance, hotkeys and plugin config. Per-device state (window layout, this " +
-          "plugin's own folder) is always excluded.",
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.includeVaultConfig).onChange(async (v) => {
-          this.plugin.settings.includeVaultConfig = v;
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.toggle(
+      containerEl,
+      "Vault settings (.obsidian)",
+      "Appearance, hotkeys and plugin config. Per-device state (window layout, this " +
+        "plugin's own folder) is always excluded.",
+      "includeVaultConfig",
+    );
 
     new Setting(containerEl)
       .setName("Additional exclusions")
@@ -188,5 +172,17 @@ export class ObsydianSyncSettingTab extends PluginSettingTab {
           .setWarning()
           .onClick(() => void this.plugin.initializeVault()),
       );
+  }
+
+  /** A toggle bound to one boolean setting, saved on change. */
+  private toggle(el: HTMLElement, name: string, desc: string | undefined, key: BooleanSetting): void {
+    const setting = new Setting(el).setName(name);
+    if (desc) setting.setDesc(desc);
+    setting.addToggle((t) =>
+      t.setValue(this.plugin.settings[key]).onChange(async (v) => {
+        this.plugin.settings[key] = v;
+        await this.plugin.saveSettings();
+      }),
+    );
   }
 }

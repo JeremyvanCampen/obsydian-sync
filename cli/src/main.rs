@@ -212,7 +212,7 @@ fn restore_one(
         .canonicalize()
         .with_context(|| format!("resolving {}", parent.display()))?;
     anyhow::ensure!(
-        store::is_under(out, &resolved),
+        resolved.starts_with(out),
         "path escapes the output directory via a symlink: {path}"
     );
 

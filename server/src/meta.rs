@@ -1,4 +1,4 @@
-use crate::ids::random_hex;
+use crate::ids::{random_bytes, random_hex};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -36,7 +36,7 @@ impl Meta {
             vault_id: random_hex(16),
             kdf: KdfParams {
                 alg: "PBKDF2-HMAC-SHA256".into(),
-                salt: B64.encode(hex::decode(random_hex(SALT_BYTES)).expect("hex we just made")),
+                salt: B64.encode(random_bytes(SALT_BYTES)),
                 iterations: DEFAULT_PBKDF2_ITERATIONS,
             },
             kdf_check: None,

@@ -1,25 +1,17 @@
 import { Notice, Plugin, type TAbstractFile } from "obsidian";
 import { SyncApi } from "./api.ts";
-import { type VaultKeys, deriveKeys, deriveMasterKey, fromBase64, makeKdfCheck, verifyKdfCheck } from "./crypto.ts";
+import { type VaultKeys, deriveKeys, deriveMasterKey, kdfProblem, makeKdfCheck, verifyKdfCheck } from "./crypto.ts";
 import { obsidianTransport } from "./obsidian-transport.ts";
 import type { Note } from "./reconcile.ts";
 import { type SyncReason, SyncScheduler } from "./scheduler.ts";
 import { DEFAULT_SETTINGS, type ObsydianSyncSettings, ObsydianSyncSettingTab } from "./settings.ts";
 import { type SecretName, migrateLegacySecrets, readSecret, writeSecret } from "./secrets.ts";
-import { PLUGIN_DIR } from "./state.ts";
+import { type SyncScope, syncScope } from "./scan.ts";
 import { SyncError, type SyncSummary, runSync } from "./sync.ts";
+import type { VaultMeta } from "./types.ts";
 
 const LOG_LIMIT = 200;
 
-/**
- * Floor for PBKDF2 iterations accepted when initializing a vault. Well below
- * the 600000 default, but far above anything that would make the passphrase
- * cheap to attack.
- */
-const MIN_KDF_ITERATIONS = 100_000;
-
-/** Minimum PBKDF2 salt. The spec's own salt is 32 bytes. */
-const MIN_KDF_SALT_BYTES = 16;
 
 interface LogLine {
   at: number;
@@ -32,19 +24,18 @@ export default class ObsydianSyncPlugin extends Plugin {
   private scheduler: SyncScheduler | null = null;
   /** Set for the next scheduled run only; see the confirm-deletions command. */
   private confirmNextRun = false;
+  /** Rebuilt whenever settings change; see syncScope. */
+  private scope: SyncScope = syncScope(DEFAULT_SETTINGS);
   private statusBar: HTMLElement | null = null;
-  private keys: VaultKeys | null = null;
   /**
-   * What the cached keys were derived from. The server contributes the KDF
-   * salt, so pointing at a different vault with the same passphrase must
-   * re-derive — otherwise the stale keys fail verification and the user is
-   * told their correct passphrase is wrong.
+   * Derived keys, with what they were derived from. The server contributes the
+   * KDF salt, so pointing at a different vault with the same passphrase must
+   * re-derive — otherwise the stale keys fail verification and the user is told
+   * their correct passphrase is wrong.
    */
-  private keysFor = "";
+  private cachedKeys: { for: string; keys: VaultKeys } | null = null;
   private readonly log: LogLine[] = [];
   private lastSummary: SyncSummary | null = null;
-  /** Set when a sync stopped to ask about mass deletion. */
-  private awaitingConfirmation = false;
 
   override async onload(): Promise<void> {
     await this.loadSettings();
@@ -76,7 +67,8 @@ export default class ObsydianSyncPlugin extends Plugin {
       id: "sync-confirm-deletions",
       name: "Sync, confirming pending deletions",
       checkCallback: (checking) => {
-        if (!this.awaitingConfirmation) return false;
+        // Derived rather than stored, so it cannot outlive the run it describes.
+        if (!this.lastSummary?.blocked) return false;
         if (!checking) {
           // Through the scheduler, not directly: a direct call could run
           // concurrently with an interval or focus sync already in flight,
@@ -124,6 +116,7 @@ export default class ObsydianSyncPlugin extends Plugin {
     if (migrated.length > 0) await this.saveData(data);
 
     this.settings = { ...DEFAULT_SETTINGS, ...(data as Partial<ObsydianSyncSettings>) };
+    this.scope = syncScope(this.settings);
   }
 
   getSecret(name: SecretName): string {
@@ -134,11 +127,12 @@ export default class ObsydianSyncPlugin extends Plugin {
     writeSecret(this.app.secretStorage, name, value);
     // A changed credential invalidates the derived keys; the cache key would
     // catch it too, but there is no reason to hold stale keys until then.
-    if (name === "passphrase") this.keys = null;
+    if (name === "passphrase") this.cachedKeys = null;
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+    this.scope = syncScope(this.settings);
     this.scheduler?.updateConfig(this.schedulerConfig());
   }
 
@@ -158,7 +152,7 @@ export default class ObsydianSyncPlugin extends Plugin {
   private registerFileTriggers(): void {
     const onChange = (file: TAbstractFile) => {
       if (!this.settings.syncOnChange || !this.isConfigured()) return;
-      if (file.path.startsWith(PLUGIN_DIR)) return;
+      if (!this.scope.includes(file.path)) return;
       // Deliberately *not* gated on a sync being in flight. Our own writes do
       // fire these events, but suppressing them would also drop edits the user
       // makes during a long sync, leaving them unsynced until the next tick.
@@ -191,20 +185,19 @@ export default class ObsydianSyncPlugin extends Plugin {
 
   // --- syncing ------------------------------------------------------------
 
-  private async keysFromSettings(): Promise<VaultKeys> {
-    const api = this.buildApi();
-    const meta = await api.meta();
-
+  /**
+   * Keys for this vault. Takes the caller's meta rather than fetching its own,
+   * so a sync costs one meta round trip, not two. Derivation is deliberately
+   * expensive, so it runs once per (server, vault, passphrase, KDF).
+   */
+  private async keysFor(meta: VaultMeta): Promise<VaultKeys> {
     const passphrase = this.getSecret("passphrase");
-    const cacheKey = `${this.settings.serverUrl}\u0000${meta.vaultId}\u0000${passphrase}`;
-    if (this.keys && this.keysFor === cacheKey) return this.keys;
+    const id = [this.settings.serverUrl, meta.vaultId, meta.kdf.salt, meta.kdf.iterations, passphrase].join("\u0000");
+    if (this.cachedKeys?.for === id) return this.cachedKeys.keys;
 
-    // Key derivation is deliberately expensive, so it is done once per
-    // (server, vault, passphrase) rather than once per sync.
-    const master = await deriveMasterKey(passphrase, meta.kdf);
-    this.keys = await deriveKeys(master);
-    this.keysFor = cacheKey;
-    return this.keys;
+    const keys = await deriveKeys(await deriveMasterKey(passphrase, meta.kdf));
+    this.cachedKeys = { for: id, keys };
+    return keys;
   }
 
   private buildApi(): SyncApi {
@@ -223,10 +216,13 @@ export default class ObsydianSyncPlugin extends Plugin {
 
     this.setStatus("syncing");
     try {
+      const api = this.buildApi();
+      const meta = await api.meta();
       const summary = await runSync({
         adapter: this.app.vault.adapter,
-        api: this.buildApi(),
-        keys: await this.keysFromSettings(),
+        api,
+        meta,
+        keys: await this.keysFor(meta),
         includeVaultConfig: this.settings.includeVaultConfig,
         exclude: this.settings.exclude,
         confirmMassDeletion: opts.confirmMassDeletion,
@@ -234,7 +230,6 @@ export default class ObsydianSyncPlugin extends Plugin {
       });
 
       this.lastSummary = summary;
-      this.awaitingConfirmation = Boolean(summary.blocked);
 
       if (summary.blocked) {
         this.setStatus("blocked");
@@ -272,9 +267,9 @@ export default class ObsydianSyncPlugin extends Plugin {
       this.setStatus("idle");
     } catch (error) {
       // A failed run tells us nothing about whether deletions are still
-      // pending, and leaving the flag set would let a later confirm force
+      // pending, and keeping the old summary would let a later confirm force
       // through deletions the user was never shown again.
-      this.awaitingConfirmation = false;
+      this.lastSummary = null;
       this.setStatus("error");
       if (reason === "manual" || error instanceof SyncError) {
         new Notice(`Obsydian Sync: ${describe(error)}`, 10000);
@@ -300,8 +295,7 @@ export default class ObsydianSyncPlugin extends Plugin {
         return;
       }
 
-      const keys = await deriveKeys(await deriveMasterKey(this.getSecret("passphrase"), meta.kdf));
-      const ok = await verifyKdfCheck(keys, meta.vaultId, meta.kdfCheck);
+      const ok = await verifyKdfCheck(await this.keysFor(meta), meta.vaultId, meta.kdfCheck);
 
       new Notice(
         ok
@@ -329,30 +323,13 @@ export default class ObsydianSyncPlugin extends Plugin {
         return;
       }
 
-      // The server supplies the KDF parameters, and this is the one moment they
-      // are not yet pinned by an existing kdfCheck. A server offering a trivial
-      // iteration count here would weaken every key the vault ever uses, so
-      // refuse rather than bake it in permanently.
-      const saltBytes = meta.kdf.salt ? fromBase64(meta.kdf.salt).length : 0;
-      if (meta.kdf.iterations < MIN_KDF_ITERATIONS || saltBytes < MIN_KDF_SALT_BYTES) {
-        // Both parameters matter. An empty salt defeats the per-vault salting
-        // entirely, so checking only the iteration count would be a guard that
-        // covers one of the two things it exists to protect.
-        new Notice(
-          `Refusing to initialize: the server offers ${meta.kdf.iterations} KDF iterations and a ` +
-            `${saltBytes}-byte salt (expected at least ${MIN_KDF_ITERATIONS} and ` +
-            `${MIN_KDF_SALT_BYTES}). Check you are pointed at the right server.`,
-          15000,
-        );
+      const problem = kdfProblem(meta.kdf);
+      if (problem) {
+        new Notice(`Refusing to initialize: ${problem}. Check you are pointed at the right server.`, 15000);
         return;
       }
 
-      const keys = await deriveKeys(await deriveMasterKey(passphrase, meta.kdf));
-      await api.initMeta(await makeKdfCheck(keys, meta.vaultId));
-
-      // Drop any cached keys so the next sync re-derives against the new meta.
-      this.keys = null;
-      this.keysFor = "";
+      await api.initMeta(await makeKdfCheck(await this.keysFor(meta), meta.vaultId));
 
       new Notice(
         "Vault initialized. Store this passphrase somewhere safe — it cannot be recovered, " +

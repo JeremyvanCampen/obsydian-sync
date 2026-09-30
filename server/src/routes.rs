@@ -20,11 +20,7 @@ pub struct AppState {
     pub meta: RwLock<Meta>,
     pub journal: Journal,
     pub blobs: BlobStore,
-    pub data_dir: std::path::PathBuf,
     pub git: GitMirror,
-    /// Blob uploads take this shared; GC takes it exclusive. Serializes a
-    /// sweep against concurrent writes into directories it has already walked.
-    pub gc_lock: RwLock<()>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -121,7 +117,7 @@ async fn init_meta(
     // passphrase and silently orphan everything written under the first.
     let mut updated = meta.clone();
     updated.kdf_check = Some(req.kdf_check);
-    updated.save(&state.data_dir)?;
+    updated.save(&state.config.data_dir)?;
     *meta = updated;
     state.git.notify();
 
@@ -172,15 +168,8 @@ struct AppendEntry {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppendResponse {
-    assigned: Vec<AssignedEntry>,
+    assigned: Vec<crate::journal::Appended>,
     head: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AssignedEntry {
-    entry_id: String,
-    seq: u64,
 }
 
 async fn post_journal(
@@ -216,10 +205,7 @@ async fn post_journal(
     state.git.notify();
 
     Ok(Json(AppendResponse {
-        assigned: assigned
-            .into_iter()
-            .map(|a| AssignedEntry { entry_id: a.entry_id, seq: a.seq })
-            .collect(),
+        assigned,
         head: state.journal.head(),
     }))
 }
@@ -258,6 +244,11 @@ async fn get_blob(
 }
 
 /// Runs a filesystem operation off the async runtime.
+///
+/// Used for work proportional to a *blob* — reading or writing up to
+/// max_blob_bytes, or sweeping the whole store. Small, bounded operations (a
+/// journal line, meta.json, an existence check) stay inline: for a single-user
+/// server a thread hop costs more than they do.
 async fn blocking<T, F>(state: &Shared, f: F) -> ApiResult<T>
 where
     F: FnOnce(&AppState) -> ApiResult<T> + Send + 'static,
@@ -288,10 +279,6 @@ async fn put_blob(
     }
 
     let outcome = blocking(&state, move |s| {
-        // Shared side of the GC lock: many uploads may run at once, but none
-        // may overlap a sweep. Taken inside the blocking task so no guard is
-        // ever held across an await.
-        let _upload = s.gc_lock.read().expect("gc lock poisoned");
         s.blobs.put(&id, &body)
     })
     .await?;
@@ -346,10 +333,6 @@ async fn post_gc(
     let live: HashSet<String> = req.live.into_iter().collect();
 
     let (outcome, remaining) = blocking(&state, move |s| {
-        // Exclusive against uploads for the duration of the sweep, so no blob
-        // is written into a directory the sweep has already walked past.
-        let _sweep = s.gc_lock.write().expect("gc lock poisoned");
-
         // A live set computed against an older journal cannot know about blobs
         // referenced by entries appended since. Deleting one is unrecoverable,
         // so refuse rather than guess.

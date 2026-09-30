@@ -9,6 +9,7 @@
 import { promises as fs } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import type { VaultAdapter } from "../src/adapter.ts";
+import type { Transport } from "../src/api.ts";
 
 export class NodeAdapter implements VaultAdapter {
   root: string;
@@ -57,3 +58,20 @@ export class NodeAdapter implements VaultAdapter {
     await fs.rename(this.abs(a), this.abs(b));
   }
 }
+
+/**
+ * A `Transport` over Node's fetch, mirroring the contract of Obsidian's
+ * `requestUrl`: it never throws on a non-2xx status, and it returns both a text
+ * and an ArrayBuffer view of the body. One copy, shared by every test and
+ * script that talks to a real server — if it drifted from `requestUrl`'s
+ * behaviour those tests would stop being evidence about the plugin.
+ */
+export const nodeTransport: Transport = async (req) => {
+  const res = await fetch(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as BodyInit),
+  });
+  const arrayBuffer = await res.arrayBuffer();
+  return { status: res.status, text: new TextDecoder().decode(arrayBuffer), arrayBuffer };
+};

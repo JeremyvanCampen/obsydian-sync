@@ -18,7 +18,6 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const IV_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the cross-language vector tests"))]
 const BLOB_ID_BYTES: usize = 16;
 
 pub const INFO_CONTENT: &str = "obsydian-sync/v1/content";
@@ -40,7 +39,6 @@ pub struct VaultKeys {
     pub meta: Key,
     /// Only the vector tests and the test-store builder derive blob ids; the
     /// CLI reads ids from the journal rather than recomputing them.
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by tests and test fixtures"))]
     pub id: Key,
     pub check: Key,
 }
@@ -112,7 +110,6 @@ pub fn aad_for_kdf_check(vault_id: &str) -> String {
 
 /// Deterministic sealing, for the test vectors and for building test stores.
 /// Production encryption happens in the plugin, with a random IV per call.
-#[cfg_attr(not(test), allow(dead_code, reason = "encryption lives in the plugin; this proves parity"))]
 pub fn seal_with_iv(key: &Key, plaintext: &[u8], aad: &str, iv: &[u8; IV_BYTES]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key).expect("32-byte key");
     let ct = cipher
@@ -145,7 +142,6 @@ pub fn unseal(key: &Key, sealed: &[u8], aad: &str) -> Result<Vec<u8>> {
 // --- blob identity --------------------------------------------------------
 
 /// `HMAC-SHA256(k_id, plaintext)[0..16]`, lowercase hex.
-#[cfg_attr(not(test), allow(dead_code, reason = "used by tests and test fixtures"))]
 pub fn blob_id(keys: &VaultKeys, plaintext: &[u8]) -> String {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&keys.id).expect("32-byte key");
     mac.update(plaintext);

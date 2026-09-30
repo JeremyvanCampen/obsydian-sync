@@ -17,8 +17,7 @@ pub fn authenticate(config: &Config, headers: &HeaderMap) -> ApiResult<String> {
 
     let token = header.strip_prefix("Bearer ").ok_or_else(ApiError::unauthorized)?;
 
-    let digest = Sha256::digest(token.as_bytes());
-    let presented = hex::encode(digest);
+    let presented = token_digest(token);
 
     // Compare against every device rather than short-circuiting, so timing does
     // not reveal how far down the device list a near-match sits.

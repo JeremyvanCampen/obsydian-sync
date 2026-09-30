@@ -43,10 +43,8 @@ export interface ScanOptions {
   keys: VaultKeys;
   /** Previous sync's state, used only to skip re-hashing unchanged files. */
   base: BaseIndex;
-  /** Extra user patterns, same syntax as ALWAYS_EXCLUDED. */
-  exclude?: readonly string[];
-  /** Whether to descend into `.obsidian` at all. */
-  includeVaultConfig: boolean;
+  /** What is in scope. Shared with the reconciler, so the two cannot disagree. */
+  scope: SyncScope;
   /** Reports files that could not be read, rather than failing the whole scan. */
   onProblem?: (path: string, error: unknown) => void;
 }
@@ -55,8 +53,6 @@ export interface ScanResult {
   local: LocalIndex;
   /** Files whose content had to be read and hashed. Useful for the sync log. */
   hashed: number;
-  /** Files skipped because (mtime, size) still matched base. */
-  reused: number;
 }
 
 /**
@@ -99,13 +95,48 @@ export function isExcludedPath(path: string, patterns: readonly string[]): boole
   return false;
 }
 
+/** The vault's config folder. Named once; see the note on syncScope. */
+export const CONFIG_DIR = ".obsidian";
+
+/**
+ * The single answer to "does this path take part in sync?".
+ *
+ * Three places used to ask it — the scan, the reconciler and the file-change
+ * trigger — each with its own copy of the rule. They must agree: a path the
+ * scan skips but the reconciler still tracks reads as a local *deletion*, and
+ * every other device trashes the file. Built once, used everywhere, and user
+ * patterns are normalised here so older saved settings match too.
+ */
+export interface SyncScope {
+  /** Whether a file at this path is synced. */
+  includes(path: string): boolean;
+  /** Whether the scan should descend into this folder at all. */
+  descends(folder: string): boolean;
+}
+
+export function syncScope(opts: {
+  exclude?: readonly string[];
+  includeVaultConfig: boolean;
+}): SyncScope {
+  const patterns = [
+    ...ALWAYS_EXCLUDED,
+    ...(opts.exclude ?? []).map(normalizeExcludePattern).filter((p) => p.length > 0),
+  ];
+  const outsideConfig = (path: string): boolean =>
+    !opts.includeVaultConfig && (path === CONFIG_DIR || path.startsWith(`${CONFIG_DIR}/`));
+
+  return {
+    includes: (path) => !outsideConfig(path) && !isExcludedPath(path, patterns),
+    descends: (folder) =>
+      !outsideConfig(folder) && !isExcluded(folder, patterns) && !isExcluded(`${folder}/`, patterns),
+  };
+}
+
 export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
-  const { adapter, keys, base, includeVaultConfig, onProblem } = opts;
-  const patterns = [...ALWAYS_EXCLUDED, ...(opts.exclude ?? [])];
+  const { adapter, keys, base, scope, onProblem } = opts;
 
   const local: LocalIndex = new Map();
   let hashed = 0;
-  let reused = 0;
 
   const queue: string[] = [""];
   const seenFolders = new Set<string>();
@@ -123,8 +154,7 @@ export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
 
     for (const sub of listing.folders) {
       const normalized = normalizePath(sub);
-      if (!includeVaultConfig && normalized === ".obsidian") continue;
-      if (isExcluded(`${normalized}/`, patterns) || isExcluded(normalized, patterns)) continue;
+      if (!scope.descends(normalized)) continue;
       // Guard against a symlink loop reported by the adapter.
       if (seenFolders.has(normalized)) continue;
       seenFolders.add(normalized);
@@ -133,7 +163,7 @@ export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
 
     for (const file of listing.files) {
       const path = normalizePath(file);
-      if (isExcluded(path, patterns)) continue;
+      if (!scope.includes(path)) continue;
 
       let stat: Awaited<ReturnType<VaultAdapter["stat"]>>;
       try {
@@ -149,7 +179,6 @@ export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
         // Fast path only. The content is *assumed* unchanged because both
         // timestamp and size match what we last hashed.
         local.set(path, { path, blobId: previous.blobId, size: stat.size, mtime: stat.mtime });
-        reused++;
         continue;
       }
 
@@ -177,7 +206,7 @@ export async function scanVault(opts: ScanOptions): Promise<ScanResult> {
     }
   }
 
-  return { local, hashed, reused };
+  return { local, hashed };
 }
 
 /**

@@ -68,6 +68,13 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        tracing::error!(error = %e, "internal error");
+        Self::new(ErrorCode::Internal, "internal error")
+    }
+}
+
 impl From<serde_json::Error> for ApiError {
     fn from(e: serde_json::Error) -> Self {
         tracing::error!(error = %e, "json error");

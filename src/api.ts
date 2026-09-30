@@ -13,7 +13,7 @@ import type {
   JournalPage,
   VaultMeta,
 } from "./types.ts";
-import { type Bytes, fromBase64, toBase64 } from "./crypto.ts";
+import type { Bytes } from "./crypto.ts";
 
 export interface HttpRequest {
   url: string;
@@ -68,6 +68,15 @@ export interface ApiOptions {
 }
 
 const DEFAULT_ATTEMPTS = 3;
+
+interface RequestOpts {
+  method: HttpRequest["method"];
+  path: string;
+  body?: string | ArrayBuffer;
+  contentType?: string;
+  /** Non-2xx statuses that are a normal answer rather than a failure. */
+  allowStatuses?: number[];
+}
 
 export class SyncApi {
   private readonly baseUrl: string;
@@ -185,12 +194,7 @@ export class SyncApi {
 
   // --- plumbing -----------------------------------------------------------
 
-  private build(opts: {
-    method: HttpRequest["method"];
-    path: string;
-    body?: string | ArrayBuffer;
-    contentType?: string;
-  }): HttpRequest {
+  private build(opts: RequestOpts): HttpRequest {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     if (opts.contentType) headers["Content-Type"] = opts.contentType;
     return {
@@ -202,14 +206,7 @@ export class SyncApi {
     };
   }
 
-  private async request(opts: {
-    method: HttpRequest["method"];
-    path: string;
-    body?: string | ArrayBuffer;
-    contentType?: string;
-    /** Non-2xx statuses that are a normal answer rather than a failure. */
-    allowStatuses?: number[];
-  }): Promise<HttpResponse> {
+  private async request(opts: RequestOpts): Promise<HttpResponse> {
     const req = this.build(opts);
     let lastError: unknown;
 
@@ -242,12 +239,7 @@ export class SyncApi {
       : new Error(`request failed: ${String(lastError)}`);
   }
 
-  private async json<T>(opts: {
-    method: HttpRequest["method"];
-    path: string;
-    body?: string | ArrayBuffer;
-    contentType?: string;
-  }): Promise<T> {
+  private async json<T>(opts: RequestOpts): Promise<T> {
     const res = await this.request(opts);
     try {
       return JSON.parse(res.text) as T;
@@ -275,5 +267,3 @@ function backoffMs(attempt: number): number {
   const base = Math.min(250 * 2 ** (attempt - 1), 4000);
   return base + Math.floor(Math.random() * 100);
 }
-
-export { fromBase64, toBase64 };

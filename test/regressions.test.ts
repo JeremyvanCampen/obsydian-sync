@@ -1,31 +1,25 @@
 /**
- * One test per defect found reviewing M4. Each fails against the code as it
- * was written; none of them were caught by the original suite.
+ * Behaviours that each broke once and were caught by review rather than by the
+ * suite. Every test here fails against the code as it was before its fix, and
+ * is named for what it protects so it still reads sensibly without that history.
  */
 
 import { describe, expect, it } from "vitest";
 import { SyncApi } from "../src/api.ts";
-import { applyPlan } from "../src/apply.ts";
-import { type VaultKeys, blobIdFor, deriveKeys, deriveMasterKey, makeKdfCheck } from "../src/crypto.ts";
+import { HEAD_BEFORE_PUT_BYTES, applyPlan } from "../src/apply.ts";
+import { type VaultKeys, aadForBlob, blobIdFor, seal } from "../src/crypto.ts";
 import type { Bytes } from "../src/crypto.ts";
 import { ensureDir, loadState, saveState, STATE_PATH } from "../src/state.ts";
 import { runSync } from "../src/sync.ts";
 import type { BaseIndex, BaseState } from "../src/types.ts";
-import { FakeAdapter, FakeServer } from "./fakes.ts";
+import { FakeAdapter, type FakeServer, fakeApi, initializedFakeVault } from "./fakes.ts";
 
-const KDF = { alg: "PBKDF2-HMAC-SHA256" as const, salt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", iterations: 1000 };
 const utf8 = new TextEncoder();
-
-async function vault() {
-  const server = new FakeServer({ "token-a": "macbook", "token-b": "iphone" });
-  const keys = await deriveKeys(await deriveMasterKey("pw", KDF));
-  server.kdfCheck = await makeKdfCheck(keys, server.vaultId);
-  return { server, keys };
-}
+const vault = () => initializedFakeVault("pw");
 
 function device(server: FakeServer, keys: VaultKeys, token: string, exclude: string[] = [], includeVaultConfig = false) {
   const adapter = new FakeAdapter();
-  const api = new SyncApi({ baseUrl: "http://fake", token, transport: server.transportFor(token), sleep: async () => {} });
+  const api = fakeApi(server, token);
   return {
     adapter,
     api,
@@ -33,7 +27,7 @@ function device(server: FakeServer, keys: VaultKeys, token: string, exclude: str
   };
 }
 
-describe("1: ensureDir created a folder per path prefix", () => {
+describe("creating a folder creates only its real parents", () => {
   it("creates only real parents", async () => {
     const adapter = new FakeAdapter();
     await ensureDir(adapter, "Work/Meetings/Deep");
@@ -54,11 +48,11 @@ describe("1: ensureDir created a folder per path prefix", () => {
   });
 });
 
-describe("2: a file edited mid-sync was uploaded under the old blobId", () => {
+describe("a push never uploads bytes under a blobId they do not hash to", () => {
   it("skips the push rather than poisoning the content-addressed store", async () => {
     const { server, keys } = await vault();
     const adapter = new FakeAdapter();
-    const api = new SyncApi({ baseUrl: "http://fake", token: "token-a", transport: server.transportFor("token-a"), sleep: async () => {} });
+    const api = fakeApi(server, "token-a");
 
     adapter.put("note.md", "original");
     const scanned = {
@@ -78,7 +72,10 @@ describe("2: a file edited mid-sync was uploaded under the old blobId", () => {
       keys,
       deviceId: "macbook",
       base,
-      plan: { actions: [{ kind: "push-put", path: "note.md", local: scanned }], notes: [] },
+      plan: {
+        actions: [{ kind: "push-put", path: "note.md", local: scanned, expect: { blobId: scanned.blobId } }],
+        notes: [],
+      },
     });
 
     expect(result.pushed).toBe(0);
@@ -88,7 +85,7 @@ describe("2: a file edited mid-sync was uploaded under the old blobId", () => {
   });
 });
 
-describe("3: adding an exclusion deleted the files on every other device", () => {
+describe("excluding a path forgets it locally without deleting it anywhere", () => {
   it("forgets excluded paths locally without journalling a deletion", async () => {
     const { server, keys } = await vault();
     const a = device(server, keys, "token-a");
@@ -135,7 +132,7 @@ describe("3: adding an exclusion deleted the files on every other device", () =>
   });
 });
 
-describe("0a: every reconciler decision was logged twice", () => {
+describe("each reconciler decision is logged once", () => {
   it("emits each plan note once", async () => {
     const { server, keys } = await vault();
     const a = device(server, keys, "token-a");
@@ -162,7 +159,7 @@ describe("0a: every reconciler decision was logged twice", () => {
   });
 });
 
-describe("0: a sync that only propagated deletions reported doing nothing", () => {
+describe("a sync reports the deletions it sends", () => {
   it("counts pushed deletions", async () => {
     const { server, keys } = await vault();
     const a = device(server, keys, "token-a");
@@ -185,7 +182,7 @@ describe("0: a sync that only propagated deletions reported doing nothing", () =
   });
 });
 
-describe("1b: an exclusion only matched the path itself, not its contents", () => {
+describe("excluding a folder excludes everything inside it", () => {
   // The scan prunes a whole folder when a pattern matches it, so its children
   // are absent from `local`. Unless reconcile is told they are excluded, they
   // look deleted — and every other device trashes them.
@@ -236,15 +233,16 @@ describe("1b: an exclusion only matched the path itself, not its contents", () =
   });
 });
 
-describe("2b: the untracked delete guard was skipped where it mattered most", () => {
+describe("an untracked file edited during a sync is not trashed", () => {
   it("keeps an untracked file edited between scan and apply", async () => {
     // These deletions are decided on timestamps alone, with no base entry —
     // the weakest ground on which anything here deletes.
     const { server, keys } = await vault();
     const adapter = new FakeAdapter();
-    const api = new SyncApi({ baseUrl: "http://fake", token: "token-a", transport: server.transportFor("token-a"), sleep: async () => {} });
+    const api = fakeApi(server, "token-a");
 
     adapter.put("stale.md", "from an old backup");
+    const scannedId = await blobIdFor(keys, utf8.encode("from an old backup") as Bytes);
     const tombstoneMtime = adapter.clock + 1000;
 
     // The user edits it after the plan was made, making it newer than the
@@ -260,7 +258,14 @@ describe("2b: the untracked delete guard was skipped where it mattered most", ()
       deviceId: "macbook",
       base: new Map(),
       plan: {
-        actions: [{ kind: "pull-delete", path: "stale.md", remote: { state: "deleted", mtime: tombstoneMtime, seq: 2 } }],
+        actions: [
+          {
+            kind: "pull-delete",
+            path: "stale.md",
+            remote: { state: "deleted", mtime: tombstoneMtime, seq: 2 },
+            expect: { blobId: scannedId },
+          },
+        ],
         notes: [],
       },
       onNote: (n) => notes.push(n.message),
@@ -268,11 +273,11 @@ describe("2b: the untracked delete guard was skipped where it mattered most", ()
 
     expect(adapter.text("stale.md")).toBe("actually I still want this");
     expect(adapter.trashed.has("stale.md")).toBe(false);
-    expect(notes.some((m) => m.includes("newer than the deletion"))).toBe(true);
+    expect(notes.some((m) => m.includes("changed during sync"))).toBe(true);
   });
 });
 
-describe("3b: a corrupt state file ignored a perfectly good previous one", () => {
+describe("a corrupt state file falls back to the previous one", () => {
   it("recovers from .prev when the main file will not parse", async () => {
     const adapter = new FakeAdapter();
     const good: BaseState = {
@@ -289,7 +294,7 @@ describe("3b: a corrupt state file ignored a perfectly good previous one", () =>
   });
 });
 
-describe("4: a crash mid-save left no state file at all", () => {
+describe("a crash while saving state never leaves no state at all", () => {
   it("recovers the previous state when the main file is missing", async () => {
     const adapter = new FakeAdapter();
     const state: BaseState = {
@@ -321,20 +326,25 @@ describe("4: a crash mid-save left no state file at all", () => {
   });
 });
 
-describe("5: hasBlob bypassed the retry layer", () => {
+describe("the blob existence check is retried like every other request", () => {
   it("retries a transient failure on the existence check", async () => {
     const { server, keys } = await vault();
     const a = device(server, keys, "token-a");
-    a.adapter.put("note.md", "content");
+    // Large enough to take the HEAD-before-PUT path; small blobs skip the HEAD
+    // entirely, and a small file here would make this test pass without
+    // exercising the existence check at all.
+    a.adapter.put("big.bin", new Uint8Array(HEAD_BEFORE_PUT_BYTES + 1));
 
     // Let meta and journal through, then fail the HEAD.
     let seen = 0;
+    let heads = 0;
     const inner = server.transportFor("token-a");
     const api = new SyncApi({
       baseUrl: "http://fake",
       token: "token-a",
       sleep: async () => {},
       transport: async (req) => {
+        if (req.method === "HEAD") heads++;
         if (req.method === "HEAD" && seen++ === 0) {
           return { status: 503, text: "{}", arrayBuffer: new ArrayBuffer(0) };
         }
@@ -344,10 +354,12 @@ describe("5: hasBlob bypassed the retry layer", () => {
 
     const summary = await runSync({ adapter: a.adapter, api, keys, includeVaultConfig: false });
     expect(summary.pushed).toBe(1);
+    // The failed HEAD was retried, not skipped.
+    expect(heads).toBe(2);
   });
 });
 
-describe("6: a conflict copy was re-hashed on every sync forever", () => {
+describe("a conflict copy takes the scan fast path afterwards", () => {
   it("keeps the mtime the file actually has on disk", async () => {
     const { server, keys } = await vault();
     const a = device(server, keys, "token-a");
@@ -371,11 +383,11 @@ describe("6: a conflict copy was re-hashed on every sync forever", () => {
   });
 });
 
-describe("7: a file edited mid-sync could be trashed", () => {
+describe("a tracked file edited during a sync is not trashed", () => {
   it("keeps an edit made between scan and apply", async () => {
     const { server, keys } = await vault();
     const adapter = new FakeAdapter();
-    const api = new SyncApi({ baseUrl: "http://fake", token: "token-a", transport: server.transportFor("token-a"), sleep: async () => {} });
+    const api = fakeApi(server, "token-a");
 
     adapter.put("note.md", "original");
     const originalId = await blobIdFor(keys, utf8.encode("original") as Bytes);
@@ -392,7 +404,14 @@ describe("7: a file edited mid-sync could be trashed", () => {
       deviceId: "macbook",
       base,
       plan: {
-        actions: [{ kind: "pull-delete", path: "note.md", remote: { state: "deleted", mtime: 1, seq: 2 } }],
+        actions: [
+          {
+            kind: "pull-delete",
+            path: "note.md",
+            remote: { state: "deleted", mtime: 1, seq: 2 },
+            expect: { blobId: originalId },
+          },
+        ],
         notes: [],
       },
       onNote: (n) => notes.push(n.message),
@@ -400,11 +419,11 @@ describe("7: a file edited mid-sync could be trashed", () => {
 
     expect(adapter.text("note.md")).toBe("rescued edit");
     expect(adapter.trashed.has("note.md")).toBe(false);
-    expect(notes.some((m) => m.includes("edited during sync"))).toBe(true);
+    expect(notes.some((m) => m.includes("changed during sync"))).toBe(true);
   });
 });
 
-describe("user-typed exclusion patterns are normalized like scanned paths", () => {
+describe("user-typed exclusion patterns match however they were typed", () => {
   it("matches regardless of leading slash, backslashes, or Unicode form", async () => {
     const { normalizeExcludePattern, isExcludedPath } = await import("../src/scan.ts");
     const scanned = "Work/Café/notes.md".normalize("NFC");
@@ -419,5 +438,70 @@ describe("user-typed exclusion patterns are normalized like scanned paths", () =
     const { normalizeExcludePattern } = await import("../src/scan.ts");
     expect(normalizeExcludePattern("/Archive/")).toBe("Archive/");
     expect(normalizeExcludePattern("*.tmp")).toBe("*.tmp");
+  });
+});
+
+
+describe("every action that touches a file re-checks it immediately before acting", () => {
+  // One rule for every action kind, so no kind is left without a guard. Before,
+  // each kind had its own check written after its race was found — and
+  // pull-put and push-delete had none.
+
+  async function setup() {
+    const { server, keys } = await vault();
+    const adapter = new FakeAdapter();
+    const api = fakeApi(server, "token-a");
+    return { server, keys, adapter, api };
+  }
+
+  it("a pull does not overwrite a local edit made after the scan", async () => {
+    const { server, keys, adapter, api } = await setup();
+    const remoteBytes = utf8.encode("the remote version") as Bytes;
+    const remoteId = await blobIdFor(keys, remoteBytes);
+    await api.putBlob(remoteId, await seal(keys.content, remoteBytes, aadForBlob(remoteId)));
+
+    adapter.put("note.md", "as scanned");
+    const scannedId = await blobIdFor(keys, utf8.encode("as scanned") as Bytes);
+    adapter.put("note.md", "typed during the sync"); // after the scan
+
+    await applyPlan({
+      adapter,
+      api,
+      keys,
+      deviceId: "macbook",
+      base: new Map(),
+      plan: {
+        actions: [
+          {
+            kind: "pull-put",
+            path: "note.md",
+            remote: { state: "present", blobId: remoteId, size: remoteBytes.length, mtime: 1, seq: 1 },
+            expect: { blobId: scannedId },
+          },
+        ],
+        notes: [],
+      },
+    });
+
+    expect(adapter.text("note.md")).toBe("typed during the sync");
+    void server;
+  });
+
+  it("a deletion is not published for a file restored after the scan", async () => {
+    const { server, keys, adapter, api } = await setup();
+    adapter.put("note.md", "restored from trash during the sync");
+
+    const base: BaseIndex = new Map([["note.md", { blobId: "a".repeat(32), size: 1, mtime: 1 }]]);
+    await applyPlan({
+      adapter,
+      api,
+      keys,
+      deviceId: "macbook",
+      base,
+      plan: { actions: [{ kind: "push-delete", path: "note.md", mtime: 1, expect: "absent" }], notes: [] },
+    });
+
+    expect(server.journal).toHaveLength(0);
+    expect(base.has("note.md")).toBe(true);
   });
 });

@@ -19,3 +19,17 @@ hmac = "0.12"
 aes-gcm = "0.10"
 pbkdf2 = "0.12"
 hkdf = "0.12"
+
+# Dev builds optimise dependencies, and the restore CLI a little.
+#
+# The full-stack test runs the debug restore CLI against a real 600000-
+# iteration vault. At opt-level 0 that takes ~3 s per run and dominated the
+# whole suite; optimising dependencies alone does not help, because
+# pbkdf2_hmac::<Sha256> is monomorphised inside the CLI crate itself. This
+# keeps the real iteration count — the test proves exactly what it did — while
+# the suite drops from ~9 s to well under one.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.obsydian-restore]
+opt-level = 1

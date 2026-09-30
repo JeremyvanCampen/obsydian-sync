@@ -15,22 +15,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
-/// Appended rather than written wholesale, so an operator's own rules survive.
-const IGNORE_BLOCK: &str = "\
-# --- obsydian-sync (managed) ---
-# Interrupted blob uploads. Staging one would commit a partial file, and git
-# history is immutable — a single interrupted 100 MiB upload would live in the
-# repository and in the GitLab mirror forever.
-.*.tmp
-*.tmp
-# --- end obsydian-sync ---
-";
-
 const IGNORE_MARKER: &str = "# --- obsydian-sync (managed) ---";
 const IGNORE_END_MARKER: &str = "# --- end obsydian-sync ---";
 /// The rules that actually matter. Checked individually, because a marker
 /// comment surviving a hand edit says nothing about whether the rules did.
 const REQUIRED_RULES: [&str; 2] = [".*.tmp", "*.tmp"];
+
+/// The managed .gitignore block, built from the constants above so the markers
+/// and rules it writes cannot drift from the ones the repair checks for.
+/// Appended rather than written wholesale, so an operator's own rules survive.
+fn ignore_block() -> String {
+    format!(
+        "{IGNORE_MARKER}\n\
+         # Interrupted blob uploads. Staging one would commit a partial file, and git\n\
+         # history is immutable — a single interrupted 100 MiB upload would live in the\n\
+         # repository and in the GitLab mirror forever.\n\
+         {}\n\
+         {IGNORE_END_MARKER}\n",
+        REQUIRED_RULES.join("\n"),
+    )
+}
 
 struct Inner {
     dir: PathBuf,
@@ -48,19 +52,13 @@ struct Inner {
     lock: Mutex<()>,
 }
 
-pub struct GitMirror {
-    tx: Option<mpsc::Sender<()>>,
-    inner: Option<Arc<Inner>>,
-}
+/// `None` when mirroring is off, so the rest of the server never branches on it.
+pub struct GitMirror(Option<(mpsc::Sender<()>, Arc<Inner>)>);
 
 impl GitMirror {
-    pub fn disabled() -> Self {
-        Self { tx: None, inner: None }
-    }
-
     pub fn start(data_dir: &Path, config: &GitConfig) -> Self {
         if !config.enabled {
-            return Self::disabled();
+            return Self(None);
         }
 
         // Capacity 1: the message means "something changed", and a queue of
@@ -110,7 +108,7 @@ impl GitMirror {
             }
         });
 
-        Self { tx: Some(tx), inner: Some(inner) }
+        Self(Some((tx, inner)))
     }
 
     /// Signals that the data directory changed.
@@ -118,7 +116,7 @@ impl GitMirror {
     /// Never blocks and never fails a request: a full channel already means a
     /// commit is coming, and a broken mirror must not stop the vault working.
     pub fn notify(&self) {
-        if let Some(tx) = &self.tx {
+        if let Some((tx, _)) = &self.0 {
             let _ = tx.try_send(());
         }
     }
@@ -129,7 +127,7 @@ impl GitMirror {
     /// the container stops — and docker's default 10s stop timeout is shorter
     /// than the 30s debounce, so that is the common case rather than a rare one.
     pub async fn flush(&self) {
-        let Some(inner) = &self.inner else { return };
+        let Some((_, inner)) = &self.0 else { return };
 
         inner.stopping.store(true, Ordering::SeqCst);
 
@@ -200,7 +198,7 @@ async fn tidy_repo(dir: &Path) {
             next.push_str(line);
             next.push('\n');
         }
-        next.push_str(IGNORE_BLOCK);
+        next.push_str(&ignore_block());
 
         if let Err(e) = std::fs::write(&ignore, next) {
             tracing::warn!(error = %e, "could not update .gitignore; temp files may be committed");

@@ -18,12 +18,16 @@ pub fn validate_id(id: &str, what: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub fn random_hex(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    // ThreadRng is a CryptoRng seeded from the OS; adequate for vault ids and
-    // KDF salts, both of which are public values that only need uniqueness.
+/// `n` random bytes. ThreadRng is a CryptoRng seeded from the OS; adequate for
+/// vault ids and KDF salts, both public values that only need uniqueness.
+pub fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
     rand::rng().fill_bytes(&mut buf);
-    hex::encode(buf)
+    buf
+}
+
+pub fn random_hex(bytes: usize) -> String {
+    hex::encode(random_bytes(bytes))
 }
 
 #[cfg(test)]

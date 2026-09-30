@@ -8,14 +8,15 @@ import {
   type VaultKeys,
   aadForJournal,
   fromBase64,
+  randomHex,
   seal,
   toBase64,
   unseal,
+  utf8,
+  utf8Decode,
 } from "./crypto.ts";
 import type { JournalEntry, JournalPayload, RemoteIndex } from "./types.ts";
 
-const utf8 = new TextEncoder();
-const utf8Decode = new TextDecoder();
 
 export interface ReplayResult {
   index: RemoteIndex;
@@ -136,13 +137,8 @@ export async function prepareEntry(
   const entryId = randomHex(16);
   const sealed = await seal(
     keys.meta,
-    utf8.encode(JSON.stringify(payload)) as Bytes,
+    utf8.encode(JSON.stringify(payload)),
     aadForJournal(deviceId, entryId),
   );
   return { entryId, payload: toBase64(sealed) };
-}
-
-export function randomHex(bytes: number): string {
-  const buf = globalThis.crypto.getRandomValues(new Uint8Array(bytes));
-  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }

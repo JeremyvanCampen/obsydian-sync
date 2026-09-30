@@ -49,9 +49,6 @@ export interface JournalPage {
   more: boolean;
 }
 
-export interface JournalAppendRequest {
-  entries: Array<{ entryId: string; payload: string }>;
-}
 
 export interface JournalAppendResponse {
   assigned: Array<{ entryId: string; seq: number }>;
@@ -141,17 +138,3 @@ export interface LocalFile {
 }
 
 export type LocalIndex = Map<string, LocalFile>;
-
-// --- Errors ---------------------------------------------------------------
-
-export type ErrorCode =
-  | "bad_request"
-  | "unauthorized"
-  | "not_found"
-  | "payload_too_large"
-  | "rate_limited"
-  | "internal";
-
-export interface ApiError {
-  error: { code: ErrorCode; message: string };
-}

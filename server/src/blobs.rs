@@ -1,6 +1,7 @@
 use crate::error::ApiResult;
 use crate::ids::validate_id;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 /// Content-addressed store of sealed blobs.
 ///
@@ -8,6 +9,11 @@ use std::path::{Path, PathBuf};
 /// lowercase hex characters and cannot escape the store directory.
 pub struct BlobStore {
     root: PathBuf,
+    /// Uploads take this shared, a sweep exclusive, so no blob is written into a
+    /// directory the sweep has already walked past. Owned by the store rather
+    /// than by the HTTP layer so every caller of `put` and `gc` is covered, not
+    /// just the routes that remembered to take it.
+    sweep: RwLock<()>,
 }
 
 pub enum PutOutcome {
@@ -26,7 +32,7 @@ impl BlobStore {
     pub fn new(data_dir: &Path) -> std::io::Result<Self> {
         let root = data_dir.join("blobs");
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self { root, sweep: RwLock::new(()) })
     }
 
     /// Two levels of 2-hex-character fanout: 256 dirs of 256 dirs, so no
@@ -54,6 +60,7 @@ impl BlobStore {
     /// only ever turn a good blob into a torn one.
     pub fn put(&self, id: &str, bytes: &[u8]) -> ApiResult<PutOutcome> {
         validate_id(id, "blobId")?;
+        let _upload = self.sweep.read().expect("blob sweep lock poisoned");
         let path = self.path_for(id);
         if path.exists() {
             return Ok(PutOutcome::AlreadyPresent);
@@ -83,53 +90,50 @@ impl BlobStore {
         live: &std::collections::HashSet<String>,
         grace: std::time::Duration,
     ) -> ApiResult<GcOutcome> {
+        let _sweep = self.sweep.write().expect("blob sweep lock poisoned");
         let now = std::time::SystemTime::now();
         let mut outcome = GcOutcome::default();
 
-        for outer in read_subdirs(&self.root)? {
-            for inner in read_subdirs(&outer)? {
-                for blob in read_dir_or_empty(&inner)? {
-                    if is_temp(&blob) {
-                        continue;
-                    }
-                    let Some(name) = blob.file_name().and_then(|n| n.to_str()) else {
-                        continue;
-                    };
-                    if live.contains(name) {
-                        continue;
-                    }
-                    let young = blob
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|m| now.duration_since(m).ok())
-                        .is_some_and(|age| age < grace);
-                    if young {
-                        outcome.spared += 1;
-                        continue;
-                    }
-                    std::fs::remove_file(&blob)?;
-                    outcome.removed += 1;
-                }
+        for blob in self.blob_files()? {
+            let Some(name) = blob.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if live.contains(name) {
+                continue;
             }
+            let young = blob
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age < grace);
+            if young {
+                outcome.spared += 1;
+                continue;
+            }
+            std::fs::remove_file(&blob)?;
+            outcome.removed += 1;
         }
         Ok(outcome)
     }
 
-    /// Counts real blobs, excluding interrupted uploads. Must use the same
-    /// filter as `gc`, or the empty-live-set guard would refuse a legitimate
-    /// GC on a vault whose only remaining files are stale temporaries.
+    /// Counts real blobs, excluding interrupted uploads.
     pub fn count(&self) -> ApiResult<usize> {
-        let mut n = 0;
+        Ok(self.blob_files()?.len())
+    }
+
+    /// Every stored blob, excluding interrupted uploads. `gc` and `count` both
+    /// go through this, so they agree on what a blob is by construction — if
+    /// they disagreed, the empty-live-set guard could refuse a legitimate GC
+    /// on a vault whose only remaining files are stale temporaries.
+    fn blob_files(&self) -> std::io::Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
         for outer in read_subdirs(&self.root)? {
             for inner in read_subdirs(&outer)? {
-                n += read_dir_or_empty(&inner)?
-                    .iter()
-                    .filter(|p| !is_temp(p))
-                    .count();
+                out.extend(read_dir_or_empty(&inner)?.into_iter().filter(|p| !is_temp(p)));
             }
         }
-        Ok(n)
+        Ok(out)
     }
 }
 

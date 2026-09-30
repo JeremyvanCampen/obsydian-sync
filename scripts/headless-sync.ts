@@ -8,10 +8,10 @@
  * were first exercised against a real client.
  */
 
-import { SyncApi, type Transport } from "../src/api.ts";
+import { SyncApi } from "../src/api.ts";
 import { deriveKeys, deriveMasterKey } from "../src/crypto.ts";
 import { runSync } from "../src/sync.ts";
-import { NodeAdapter } from "../test/node-adapter.ts";
+import { NodeAdapter, nodeTransport } from "../test/node-adapter.ts";
 
 const [vault, baseUrl, token, passphrase] = process.argv.slice(2);
 if (!vault || !baseUrl || !token || !passphrase) {
@@ -19,17 +19,7 @@ if (!vault || !baseUrl || !token || !passphrase) {
   process.exit(2);
 }
 
-const transport: Transport = async (req) => {
-  const res = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as BodyInit),
-  });
-  const buf = await res.arrayBuffer();
-  return { status: res.status, text: new TextDecoder().decode(buf), arrayBuffer: buf };
-};
-
-const api = new SyncApi({ baseUrl, token, transport });
+const api = new SyncApi({ baseUrl, token, transport: nodeTransport });
 const meta = await api.meta();
 const keys = await deriveKeys(await deriveMasterKey(passphrase, meta.kdf));
 
@@ -37,6 +27,7 @@ const s = await runSync({
   adapter: new NodeAdapter(vault),
   api,
   keys,
+  meta,
   includeVaultConfig: true,
   onNote: (n) => console.log(`  [${n.level}] ${n.path || "-"}: ${n.message}`),
 });
