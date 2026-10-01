@@ -82,6 +82,14 @@ impl GitMirror {
                     return;
                 }
                 tidy_repo(&task_inner.dir).await;
+                // Whatever is already on disk: commits otherwise follow only a
+                // journal append, and a vault nobody edits never appends, so a
+                // store that predates the mirror would stay out of it for good.
+                match commit(&task_inner.dir).await {
+                    Ok(true) => tracing::info!("committed the existing store"),
+                    Ok(false) => {}
+                    Err(e) => tracing::error!(error = %e, "git commit failed"),
+                }
             }
             task_inner.ready.store(true, Ordering::SeqCst);
 
@@ -360,6 +368,24 @@ async fn run(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn commits_a_store_that_predates_the_mirror_without_waiting_for_a_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("journal.ndjson"), "{}\n").unwrap();
+        let config = GitConfig { enabled: true, debounce_secs: 3600 };
+        let _mirror = GitMirror::start(dir.path(), &config);
+
+        // No notify(): the only commit that can appear is the startup one.
+        for _ in 0..100 {
+            let head = git(dir.path()).args(["rev-parse", "--verify", "HEAD"]).output().await.unwrap();
+            if head.status.success() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the existing store was never committed");
+    }
 
     #[tokio::test]
     async fn initializes_a_store_with_no_repository() {
