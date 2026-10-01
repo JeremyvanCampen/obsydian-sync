@@ -24,7 +24,7 @@ No mirror remote configured. Create a private project on gitlab.com and a
 Project Access Token with the write_repository scope, then:
 
   # The token goes OUTSIDE the data directory. /mnt/docker/appdata is what the
-  # nightly your backup tool job replicates to off-site storage — a write_repository
+  # nightly backup job replicates to off-site storage — a write_repository
   # credential in .git/config there would be copied off-site in cleartext, and
   # it is the one piece of this system that is not already ciphertext.
   mkdir -p ~/.config/obsydian-mirror
@@ -55,7 +55,7 @@ fi
 remote_url=$(git remote get-url "$REMOTE")
 if printf '%s' "$remote_url" | grep -qE '^https?://[^/@]*@'; then
   echo "$(date -Is) refusing to push: the remote URL embeds a credential." >&2
-  echo "  It is inside the your backup tool-backed tree and would be copied off-site in cleartext." >&2
+  echo "  It is inside the backed-up tree and would be copied off-site in cleartext." >&2
   echo "  Move it to a credential file — see the instructions above by removing the remote." >&2
   exit 1
 fi

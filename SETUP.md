@@ -167,8 +167,17 @@ git remote add origin https://gitlab.com/you/obsidian-vault.git
 git config credential.helper "store --file=$HOME/.config/obsydian-mirror/credentials"
 
 cp ~/obsydian-sync/docker/push-mirror.sh ~/docker-stack/
+cp ~/obsydian-sync/docker/check-mirror.sh ~/docker-stack/
 crontab -e    # */15 * * * * ~/docker-stack/push-mirror.sh >> ~/.local/state/obsydian-mirror.log 2>&1
+              # 0 9 * * *    ~/docker-stack/check-mirror.sh >/dev/null 2>&1
 ```
+
+`check-mirror.sh` is a dead-man's switch: set `MIRROR_HC_URL` to a
+healthchecks.io check in `~/.config/homeserver-monitor/config.env` and it pings
+only while the mirror is healthy. It fails 30 days before the token expires
+(`MIRROR_WARN_DAYS`), when GitLab rejects the token, and when GitLab has been
+behind the server for over an hour. An expired token otherwise shows up only
+in the push log, and the mirror quietly stops being a backup.
 
 `push-mirror.sh` refuses to run if it finds a credential embedded in the remote
 URL, rather than letting it sit there unnoticed.
@@ -177,8 +186,7 @@ No device ever talks to GitLab; only this script does. What is pushed is
 ciphertext, so the mirror is useless to GitLab and complete to you.
 
 Note the data directory is also inside `/mnt/docker/appdata`, so the existing
-your backup tool job already backs it up nightly to `/mnt/series/your backup tool` and to off-site storage
-B2 — the GitLab mirror is a second off-site copy, not the only one.
+nightly backup job already copies it to local and off-site storage — the GitLab mirror is a second off-site copy, not the only one.
 
 ---
 

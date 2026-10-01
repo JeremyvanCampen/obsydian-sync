@@ -29,8 +29,8 @@
     ports:
       - "100.x.y.z:8787:8787"   # tailnet only — see above
     volumes:
-      # Under appdata, so the existing your backup tool job backs it up nightly to
-      # /mnt/series/your backup tool and to off-site storage with the rest of the stack.
+      # Under appdata, so the existing nightly backup job copies it to
+      # local and off-site storage with the rest of the stack.
       - /mnt/docker/appdata/obsydian-sync/data:/data
       - /mnt/docker/appdata/obsydian-sync/config:/config:ro
     environment:
