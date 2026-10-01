@@ -50,10 +50,19 @@ async fn main() -> Result<()> {
         tracing::warn!("vault is not initialized; the first client to connect will set the passphrase");
     }
 
-    let git = gitmirror::GitMirror::start(&config.data_dir, &config.git);
     let journal = journal::Journal::open(&config.data_dir)?;
     let blobs = blobs::BlobStore::new(&config.data_dir)?;
     let bind = config.bind;
+
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+
+    // Only once the port is ours. Started any earlier, a startup that is about
+    // to fail spawns `git init` and then drops the runtime under it — which is
+    // exactly how a deployment ended up with an empty `.git` and a mirror that
+    // never committed.
+    let git = gitmirror::GitMirror::start(&config.data_dir, &config.git);
 
     let state = Arc::new(routes::AppState {
         config,
@@ -65,10 +74,6 @@ async fn main() -> Result<()> {
 
     let shutdown_state = state.clone();
     let app = routes::router(state).layer(tower_http::trace::TraceLayer::new_for_http());
-
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
 
     // The *resolved* address, not the configured one. With port 0 the config
     // says "0" and only the OS knows the answer, so logging the config value

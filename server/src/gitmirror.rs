@@ -150,11 +150,54 @@ impl GitMirror {
 }
 
 async fn ensure_repo(dir: &Path) -> anyhow::Result<()> {
-    if !dir.join(".git").exists() {
-        run(dir, &["init", "--quiet", "--initial-branch=main"]).await?;
-        tracing::info!(dir = %dir.display(), "initialized the mirror repository");
+    if is_repo(dir).await {
+        return Ok(());
     }
+
+    let git_dir = dir.join(".git");
+    if git_dir.exists() {
+        // Checking that `.git` *exists* is not enough. An interrupted `git init`
+        // — a startup that fails moments after spawning it — leaves an empty
+        // `.git` behind, and a check for existence then skips the init and lets
+        // every commit fail forever, visible only in the logs.
+        //
+        // Empty is safe to redo: there is nothing in it to lose. Anything else
+        // that is not a valid repository is left alone, because it might be
+        // someone's data, and deleting it to make room is not this code's call.
+        let empty = std::fs::read_dir(&git_dir)?.next().is_none();
+        anyhow::ensure!(
+            empty,
+            "{} exists but is not a git repository; leaving it alone. Move it aside to let the mirror start.",
+            git_dir.display()
+        );
+        tracing::warn!(dir = %git_dir.display(), "found an empty .git left by an interrupted init; re-initializing");
+        std::fs::remove_dir(&git_dir)?;
+    }
+
+    run(dir, &["init", "--quiet", "--initial-branch=main"]).await?;
+    tracing::info!(dir = %dir.display(), "initialized the mirror repository");
     Ok(())
+}
+
+async fn is_repo(dir: &Path) -> bool {
+    git(dir)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .await
+        .is_ok_and(|o| o.status.success())
+}
+
+/// A git command bound to the store's own repository.
+///
+/// GIT_DIR and GIT_WORK_TREE are explicit so git never goes looking upward. With
+/// discovery left on, a store without a valid `.git` that happened to sit inside
+/// some other repository would commit the whole encrypted vault into *that* one.
+fn git(dir: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(dir)
+        .env("GIT_DIR", dir.join(".git"))
+        .env("GIT_WORK_TREE", dir);
+    cmd
 }
 
 /// Best-effort housekeeping on an existing repository.
@@ -211,8 +254,7 @@ async fn tidy_repo(dir: &Path) {
     // `-z` because git C-quotes non-ASCII paths by default and splits on
     // newlines, and a path that survives neither would silently never be
     // untracked — which is the one thing this block exists to prevent.
-    if let Ok(output) = tokio::process::Command::new("git")
-        .current_dir(dir)
+    if let Ok(output) = git(dir)
         .args(["ls-files", "-z", "--", "*.tmp", ".*.tmp"])
         .output()
         .await
@@ -229,8 +271,7 @@ async fn tidy_repo(dir: &Path) {
 
         if !tracked.is_empty() {
             tracing::warn!(count = tracked.len(), "untracking temp files committed by an earlier run");
-            let status = tokio::process::Command::new("git")
-                .current_dir(dir)
+            let status = git(dir)
                 .args(["rm", "--cached", "--quiet", "--"])
                 .args(&tracked)
                 .output()
@@ -263,8 +304,7 @@ fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
 async fn commit(dir: &Path) -> anyhow::Result<bool> {
     run(dir, &["add", "-A"]).await?;
 
-    let status = tokio::process::Command::new("git")
-        .current_dir(dir)
+    let status = git(dir)
         .args(["diff", "--cached", "--quiet"])
         .status()
         .await?;
@@ -303,8 +343,7 @@ async fn commit(dir: &Path) -> anyhow::Result<bool> {
 }
 
 async fn run(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(dir)
+    let output = git(dir)
         .args(args)
         .output()
         .await?;
@@ -316,4 +355,73 @@ async fn run(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initializes_a_store_with_no_repository() {
+        let dir = tempfile::TempDir::new().unwrap();
+        ensure_repo(dir.path()).await.unwrap();
+        assert!(is_repo(dir.path()).await);
+    }
+
+    #[tokio::test]
+    async fn recovers_an_empty_git_dir_left_by_an_interrupted_init() {
+        // The production failure: a startup that failed seconds after spawning
+        // `git init` left `.git` created but empty, and every commit after that
+        // failed with "not a git repository".
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        ensure_repo(dir.path()).await.unwrap();
+
+        assert!(is_repo(dir.path()).await);
+        std::fs::write(dir.path().join("journal.ndjson"), "{}\n").unwrap();
+        assert!(commit(dir.path()).await.unwrap(), "a commit must now succeed");
+    }
+
+    #[tokio::test]
+    async fn leaves_a_non_empty_invalid_git_dir_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::write(git_dir.join("not-ours"), "something that should not be deleted").unwrap();
+
+        assert!(ensure_repo(dir.path()).await.is_err());
+        assert!(git_dir.join("not-ours").exists(), "must not delete what it does not understand");
+    }
+
+    #[tokio::test]
+    async fn never_commits_into_an_enclosing_repository() {
+        // A store inside another repository, with no repository of its own yet.
+        let outer = tempfile::TempDir::new().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(outer.path())
+            .status()
+            .unwrap()
+            .success());
+        let store = outer.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+
+        // Without explicit GIT_DIR, git would find the outer repository here.
+        assert!(!is_repo(&store).await);
+
+        ensure_repo(&store).await.unwrap();
+        std::fs::write(store.join("journal.ndjson"), "{}\n").unwrap();
+        commit(&store).await.unwrap();
+
+        let outer_log = std::process::Command::new("git")
+            .args(["log", "--oneline"])
+            .current_dir(outer.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&outer_log.stdout).trim().is_empty(),
+            "the enclosing repository must have received no commits"
+        );
+    }
 }
