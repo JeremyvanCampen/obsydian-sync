@@ -116,6 +116,8 @@ export interface SyncScope {
   includes(path: string): boolean;
   /** Whether the scan should descend into this folder at all. */
   descends(folder: string): boolean;
+  /** Whether a path is in a config folder, this device's or another's. */
+  isVaultConfig(path: string): boolean;
 }
 
 export function syncScope(opts: {
@@ -166,6 +168,7 @@ export function syncScope(opts: {
       !outsideConfig(folder) &&
       !isExcluded(folder, patterns) &&
       !isExcluded(`${folder}/`, patterns),
+    isVaultConfig: (path) => configFolderOf(path) !== null,
   };
 }
 

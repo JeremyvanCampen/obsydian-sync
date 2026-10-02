@@ -390,7 +390,17 @@ A path with no base entry has never been synced by this device. With no base,
 there is no evidence of what changed:
 
 - **Local file, remote present, same content** — converged; adopt it.
-- **Local file, remote present, different content** — conflict (§6.2).
+- **Local file, remote present, different content** — conflict (§6.2), except
+  in a config folder on a device with **no base state at all** (joining the
+  vault): there the client **MUST** replace the local file with the vault's
+  version, moving the local one to its own trash first. A device joining
+  the vault carries settings Obsidian generated for it — a default `app.json`, a
+  `community-plugins.json` listing only what was installed to get sync running.
+  As conflicts, those keep the newcomer's defaults in place and push them to
+  every other device, switching plugins off there. A device that has base
+  state but no entry for the setting (config sync enabled late, or toggled)
+  may hold its real settings, so that is an ordinary conflict, as is a setting
+  edited differently on two devices after it was synced.
 - **Local file, remote tombstone** — the stale-copy case. A device set up from
   an old backup would otherwise resurrect everything the vault has legitimately
   deleted. With no better evidence available, compare timestamps: keep the file

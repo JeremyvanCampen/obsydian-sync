@@ -124,6 +124,24 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
         break;
       }
 
+      case "replace-local": {
+        const content = await downloadBlob(api, keys, action.remote.blobId);
+        if (!(await unchanged(action, await readLocal(adapter, action.path)))) continue;
+
+        // Never synced, so this device's .trash is the only copy left. If the
+        // write below fails, the path is empty and the next sync pulls it.
+        await adapter.trashLocal(action.path);
+        await writeLocal(adapter, action.path, content);
+        const stat = await adapter.stat(action.path);
+        base.set(action.path, {
+          blobId: action.remote.blobId,
+          size: content.length,
+          mtime: stat?.mtime ?? action.remote.mtime,
+        });
+        result.pulled++;
+        break;
+      }
+
       case "conflict": {
         // All or nothing, up to the first write: both preconditions are checked
         // before anything touches the vault, so a refusal leaves both sides

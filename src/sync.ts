@@ -136,6 +136,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncSummary> {
     // The same scope the scan used, so reconcile can tell "excluded" from
     // "deleted" rather than reading a settings change as a mass deletion.
     isExcluded: (path) => !scope.includes(path),
+    isVaultConfig: scope.isVaultConfig,
   });
 
   for (const note of plan.notes) opts.onNote?.(note);

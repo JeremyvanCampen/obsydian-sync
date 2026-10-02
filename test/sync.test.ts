@@ -30,13 +30,13 @@ class Device {
     this.adapter.clock += clockOffset;
   }
 
-  sync(opts: { confirmMassDeletion?: boolean } = {}): Promise<SyncSummary> {
+  sync(opts: { confirmMassDeletion?: boolean; includeVaultConfig?: boolean } = {}): Promise<SyncSummary> {
     return runSync({
       adapter: this.adapter,
       api: this.api,
       keys,
       layout: DEFAULT_LAYOUT,
-      includeVaultConfig: false,
+      includeVaultConfig: opts.includeVaultConfig ?? false,
       confirmMassDeletion: opts.confirmMassDeletion,
     });
   }
@@ -314,5 +314,45 @@ describe("resilience", () => {
     expect(confirmed.deletedLocally).toBe(20);
     expect(notes()).toHaveLength(0);
     expect(c.adapter.trashed.size).toBe(20);
+  });
+});
+
+describe("setting up a new device", () => {
+  it("takes the vault's settings rather than pushing the new device's defaults", async () => {
+    // What happened setting up the MacBook: the desktop's vault has its
+    // plugins enabled; the new, empty vault has only what was installed to get
+    // the sync plugin running, plus Obsidian's generated defaults.
+    const desktop = new Device("token-a");
+    desktop.adapter.put(".obsidian/community-plugins.json", '["obsidian-excalidraw-plugin","obsydian-sync"]');
+    desktop.adapter.put(".obsidian/app.json", '{"vimMode":true}');
+    desktop.adapter.put("Note.md", "the desktop's note");
+    await desktop.sync({ includeVaultConfig: true });
+
+    const laptop = new Device("token-b", 60_000);
+    laptop.adapter.put(".obsidian/community-plugins.json", '["obsidian42-brat","obsydian-sync"]');
+    laptop.adapter.put(".obsidian/app.json", "{}");
+    laptop.adapter.put("Note.md", "a different note under the same name");
+    await laptop.sync({ includeVaultConfig: true });
+
+    // The laptop now runs with the vault's settings...
+    expect(laptop.adapter.text(".obsidian/community-plugins.json")).toBe(
+      '["obsidian-excalidraw-plugin","obsydian-sync"]',
+    );
+    expect(laptop.adapter.text(".obsidian/app.json")).toBe('{"vimMode":true}');
+    // ...its own are recoverable from its trash, not discarded...
+    expect(new TextDecoder().decode(laptop.adapter.trashed.get(".obsidian/app.json")!.data)).toBe("{}");
+    // ...and nothing about settings was published as a conflict.
+    const paths = [...laptop.adapter.files.keys()];
+    expect(paths.filter((p) => p.startsWith(".obsidian/") && p.includes("conflict"))).toEqual([]);
+    // A note is still a conflict: both versions are kept.
+    expect(paths.filter((p) => p.startsWith("Note (conflict"))).toHaveLength(1);
+
+    // The desktop keeps its settings, untouched.
+    await desktop.sync({ includeVaultConfig: true });
+    expect(desktop.adapter.text(".obsidian/community-plugins.json")).toBe(
+      '["obsidian-excalidraw-plugin","obsydian-sync"]',
+    );
+    expect(desktop.adapter.text(".obsidian/app.json")).toBe('{"vimMode":true}');
+    expect([...desktop.adapter.files.keys()].filter((p) => p.includes("conflict") && p.startsWith(".obsidian/"))).toEqual([]);
   });
 });

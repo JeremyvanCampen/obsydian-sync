@@ -31,11 +31,12 @@ function run(opts: {
   base?: Record<string, BaseFile>;
   local?: Record<string, LocalFile>;
   remote?: Record<string, RemoteEntry>;
+  isVaultConfig?: (path: string) => boolean;
 }): Plan {
   const base: BaseIndex = new Map(Object.entries(opts.base ?? {}));
   const local: LocalIndex = new Map(Object.entries(opts.local ?? {}));
   const remote: RemoteIndex = new Map(Object.entries(opts.remote ?? {}));
-  return reconcile({ base, local, remote, now: NOW });
+  return reconcile({ base, local, remote, now: NOW, isVaultConfig: opts.isVaultConfig });
 }
 
 const kinds = (plan: Plan): string[] => plan.actions.map((a) => a.kind);
@@ -255,6 +256,59 @@ describe("untracked paths", () => {
     expect(kinds(plan)).toEqual(["conflict"]);
     // The local version stays exactly where it was.
     expect(plan.actions[0]?.path).toBe("a.md");
+  });
+
+  describe("vault settings on a device's first sync", () => {
+    const isVaultConfig = (p: string) => p.startsWith(".obsidian/");
+
+    it("the vault's version replaces the device's generated defaults", () => {
+      const plan = run({
+        local: { ".obsidian/app.json": localFile(".obsidian/app.json", "aa") },
+        remote: { ".obsidian/app.json": present("bb") },
+        isVaultConfig,
+      });
+      expect(only(plan)).toMatchObject({
+        kind: "replace-local",
+        path: ".obsidian/app.json",
+        expect: { blobId: "aa" },
+      });
+    });
+
+    it("a note with the same history still conflicts", () => {
+      const plan = run({
+        local: { "a.md": localFile("a.md", "aa") },
+        remote: { "a.md": present("bb") },
+        isVaultConfig,
+      });
+      expect(kinds(plan)).toEqual(["conflict"]);
+    });
+
+    it("a device with sync history that has never synced this setting still conflicts", () => {
+      // Config sync switched on late, or off and on again: the untracked file
+      // may be this device's real settings, not generated defaults.
+      const plan = run({
+        base: { "a.md": baseFile("nn") },
+        local: {
+          "a.md": localFile("a.md", "nn"),
+          ".obsidian/app.json": localFile(".obsidian/app.json", "aa"),
+        },
+        remote: { "a.md": present("nn"), ".obsidian/app.json": present("bb") },
+        isVaultConfig,
+      });
+      expect(kinds(plan)).toEqual(["conflict"]);
+    });
+
+    it("a setting both devices changed after syncing it still conflicts", () => {
+      // Only the device's *never-synced* defaults lose. A real edit on each
+      // side is a genuine conflict, settings or not.
+      const plan = run({
+        base: { ".obsidian/app.json": baseFile("00") },
+        local: { ".obsidian/app.json": localFile(".obsidian/app.json", "aa") },
+        remote: { ".obsidian/app.json": present("bb") },
+        isVaultConfig,
+      });
+      expect(kinds(plan)).toEqual(["conflict"]);
+    });
   });
 
   describe("stale-copy protection", () => {

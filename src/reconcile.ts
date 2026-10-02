@@ -53,6 +53,11 @@ export type Action =
       remote: RemotePresent;
       expect: Expect;
     }
+  /**
+   * Replace an untracked local file with the vault's version, moving the local
+   * one to `.trash` first. Only for vault settings: see `isVaultConfig`.
+   */
+  | { kind: "replace-local"; path: string; remote: RemotePresent; expect: Expect }
   /** Move the local file to `.trash` — only ever against a real tombstone. */
   | { kind: "pull-delete"; path: string; remote: RemoteTombstone; expect: Expect }
   /** Both sides already agree; record it in base and touch nothing. */
@@ -102,6 +107,21 @@ export interface ReconcileInput {
    * other device.
    */
   isExcluded?: (path: string) => boolean;
+  /**
+   * Whether a path is vault settings (inside a config folder).
+   *
+   * A device joining the vault arrives with settings Obsidian generated for
+   * it: a default `app.json`, a `community-plugins.json` listing only what was
+   * installed to get the sync running. Treated like notes, each of those is a
+   * first-sync conflict that keeps the *device's* defaults in place and pushes
+   * them to every other device — so setting up a laptop switched plugins off on
+   * the desktop. For settings, the vault's version is the one that counts.
+   *
+   * Only while the device is *joining* — no sync history at all. An untracked
+   * setting on a device that does have history (config sync switched on late,
+   * or off and on again) may be its real settings, and still conflicts.
+   */
+  isVaultConfig?: (path: string) => boolean;
 }
 
 /** How the local file compares to what we last synced. */
@@ -122,6 +142,9 @@ export function reconcile(input: ReconcileInput): Plan {
   const actions: Action[] = [];
   const notes: Note[] = [];
   let untrackedDeletions = 0;
+  // No history at all: a new device, or one whose state was lost entirely.
+  // Either way it has nothing of its own that the vault has not seen.
+  const joining = base.size === 0;
 
   const paths = new Set<string>([...base.keys(), ...local.keys(), ...remote.keys()]);
 
@@ -323,6 +346,16 @@ export function reconcile(input: ReconcileInput): Plan {
       if (r.state === "present") {
         if (l.blobId === r.blobId) {
           actions.push({ kind: "adopt-base", path, blobId: l.blobId, size: l.size, mtime: l.mtime });
+          return;
+        }
+        if (joining && input.isVaultConfig?.(path)) {
+          actions.push({ kind: "replace-local", path, remote: r, expect: { blobId: l.blobId } });
+          notes.push({
+            level: "warn",
+            path,
+            message:
+              "first sync of this setting: the vault's version replaces this device's, which is in .trash",
+          });
           return;
         }
         emitConflict(path, l, r, "first sync found different content on both sides");
